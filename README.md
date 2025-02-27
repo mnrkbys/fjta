@@ -1,6 +1,9 @@
 # FJTA - Forensic Journal Timeline Analyzer
 
-FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesystem (EXT4, XFS) journals, generates timelines, and detects suspicious activities.
+FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesystem (EXT4, XFS) journals (not systemd-journald), generates timelines, and detects suspicious activities.
+
+> [!CAUTION]
+> Since testing is only being done with simple disk images, there may be many issues when using more practical disk images.
 
 ## Features
 
@@ -14,6 +17,7 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 - Python 3.12 or later
 - [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) (develop branch is needed)
 - [pytsk](https://github.com/py4n6/pytsk) (needs to compile with TSK's develop branch)
+- [Construct](https://github.com/construct/construct)
 
 ## Installation
 
@@ -24,7 +28,12 @@ git clone https://github.com/mnrkbys/fjta.git
 ## Usage
 
 ```bash
-python ./fjta.py -i /home/john/ext4.img | jq
+python ./fjta.py -i ~/ext4.img | jq
+```
+
+## Execution Results
+
+```bash
 {
   "transaction_id": 2,
   "inode": 7,

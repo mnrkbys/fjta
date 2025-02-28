@@ -1,5 +1,5 @@
 #
-# Copyright 2024 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
@@ -10,6 +10,7 @@
 # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_fs.h
 # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_format.h
 # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_da_format.h
+# https://github.com/torvalds/linux/blob/master/include/uapi/linux/stat.h
 
 from enum import IntEnum, auto
 
@@ -220,9 +221,12 @@ xfs_legacy_timestamp_be = Struct(
     "t_nsec" / Int32ub,  # 0x04: Nanoseconds.
 )
 
+XFS_DINODE_MAGIC = 0x494E  # 'IN'
+
 # XFS Dinode Core structure (big endian)
 xfs_dinode_core_be = Struct(
-    "di_magic" / Const(b"IN"),  # 0x00: The inode signature; these two bytes are “IN” (0x494e).
+    # "di_magic" / Const(b"IN"),  # 0x00: The inode signature; these two bytes are “IN” (0x494e).
+    "di_magic" / Int16ub,  # 0x00: The inode signature; these two bytes are “IN” (0x494e).
     "di_mode" / Int16ub,  # 0x02: Specifies the mode access bits and type of file.
     "di_version" / Int8ub,  # 0x04: Specifies the inode version.
     "di_format" / Int8ub,  # 0x05: Specifies the format of the data fork.
@@ -288,7 +292,8 @@ xfs_legacy_timestamp_le = Struct(
 
 # XFS Dinode Core structure (little endian)
 xfs_dinode_core_le = Struct(
-    "di_magic" / Const(b"NI"),  # 0x00: The inode signature; these two bytes are “IN” (0x494e).
+    # "di_magic" / Const(b"NI"),  # 0x00: The inode signature; these two bytes are “IN” (0x494e).
+    "di_magic" / Int16ul,  # 0x00: The inode signature; these two bytes are “IN” (0x494e).
     "di_mode" / Int16ul,  # 0x02: Specifies the mode access bits and type of file.
     "di_version" / Int8ul,  # 0x04: Specifies the inode version.
     "di_format" / Int8ul,  # 0x05: Specifies the format of the data fork.
@@ -300,9 +305,6 @@ xfs_dinode_core_le = Struct(
     "di_projid_hi" / Int16ul,  # 0x16: Specifies the high 16 bits of the owner's project ID in v2 inodes.
     # "di_flushiter" / Int16ul,  # 0x18: Incremented on flush (v2 inodes).
     "di_big_nextents" / Int64ul,  # 0x18: Number of data fork extents if NREXT64 is set. Padding for V3 inodes without NREXT64 set.
-    # "di_atime" / xfs_legacy_timestamp_le,  # 0x1A: Last access time.
-    # "di_mtime" / xfs_legacy_timestamp_le,  # 0x22: Last modification time.
-    # "di_ctime" / xfs_legacy_timestamp_le,  # 0x2A: Last status change time.
     "di_atime"
     / Union(  # 0x20: Last access time.
         0,
@@ -590,7 +592,7 @@ xfs_buf_log_format_be = Struct(
     "blf_len" / Int16ub,  # 0x06: Number of sectors affected by this buffer.
     "blf_blkno" / Int64sb,  # 0x08: Block number to write, in sectors.
     "blf_map_size" / Int32ub,  # 0x10: The size of blf_data_map, in 32-bit words.
-    "blf_data_map" / Array(lambda this: this.blf_map_size, Int32ub),  # 0x14: Dirty bitmap for the logged buffer.
+    "blf_data_map" / Array(lambda ctx: ctx.blf_map_size, Int32ub),  # 0x14: Dirty bitmap for the logged buffer.
 )
 
 # XFS Buffer Log Format structure (little endian)
@@ -601,7 +603,7 @@ xfs_buf_log_format_le = Struct(
     "blf_len" / Int16ul,  # 0x06: Number of sectors affected by this buffer.
     "blf_blkno" / Int64sl,  # 0x08: Block number to write, in sectors.
     "blf_map_size" / Int32ul,  # 0x10: The size of blf_data_map, in 32-bit words.
-    "blf_data_map" / Array(lambda this: this.blf_map_size, Int32ul),  # 0x14: Dirty bitmap for the logged buffer.
+    "blf_data_map" / Array(lambda ctx: ctx.blf_map_size, Int32ul),  # 0x14: Dirty bitmap for the logged buffer.
 )
 
 # Buffer Log Format Flags
@@ -663,7 +665,7 @@ xfs_dir3_data_hdr = Struct(
 xfs_dir2_data_entry = Struct(
     "inumber" / Int64ub,  # 0x00: The inode number that this entry points to.
     "namelen" / Int8ub,  # 0x08: Length of the name, in bytes.
-    "name" / Bytes(lambda this: this.namelen),  # 0x09: The name associated with this entry.
+    "name" / Bytes(lambda ctx: ctx.namelen),  # 0x09: The name associated with this entry.
     "ftype" / Int8ub,  # 0x09 + namelen: The type of the inode.
     "pad" / Padding(lambda ctx: 4 - (ctx.namelen % 4)),  # Padding to align to 4 bytes. Not stated in the specification.
     "tag" / Int16ub,  # 0x0A + namelen: Starting offset of the entry, in bytes.
@@ -688,7 +690,7 @@ xfs_dir2_data_union = Struct(
     "type" / Int16ub,  # 0x00: Type indicator (0xFFFF for unused, otherwise directory entry)
     "data"
     / Switch(
-        lambda this: this.type,
+        lambda ctx: ctx.type,
         {
             0xFFFF: xfs_dir2_data_unused,  # Unused entry
         },

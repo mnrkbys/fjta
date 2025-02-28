@@ -1,5 +1,5 @@
 #
-# Copyright 2024 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
@@ -44,6 +44,27 @@ class Actions(Flag):
     CHANGE_SYMLINK_TARGET = auto()
     CHANGE_EA = auto()
 
+class EntryInfoSource(Flag):
+    UNKNOWN = 0
+    INODE = auto()
+    DIR_ENTRY = auto()
+    WORKING_ENTRY = auto()
+
+
+@dataclass
+class NameInfo:
+    name: str = ""
+    dir_inode: int = 0
+    parent_inode: int = 0
+
+
+@dataclass
+class DeviceNumber:
+    major: int = 0
+    minor: int = 0
+
+    def to_dict(self) -> dict:
+        return {"major": self.major, "minor": self.minor}
 
 @dataclass
 class ExtendedAttribute:
@@ -71,7 +92,7 @@ class ExtendedAttribute:
 @dataclass
 class EntryInfo:
     inode: int = 0
-    file_type: int = FileTypes.UNKNOWN
+    file_type: FileTypes = FileTypes.UNKNOWN
     name: list[str] = field(default_factory=list)  # multiple names might be assigned to the same inode (hard link)
     dir_inode: int = 0
     parent_inode: int = 0
@@ -93,6 +114,8 @@ class EntryInfo:
     # link_count: int = 0  # TODO: Need this to distinguish between moving files and creating links?
     symlink_target: str = ""
     extended_attributes: list[ExtendedAttribute] = field(default_factory=list)
+    device_number: DeviceNumber = field(default_factory=DeviceNumber)
+    entryinfo_source: EntryInfoSource = EntryInfoSource.UNKNOWN
 
 
 @dataclass
@@ -113,7 +136,7 @@ class JournalTransaction[T: EntryInfo]:
 class TimelineEventInfo:
     transaction_id: int = 0
     inode: int = 0
-    file_type: int = FileTypes.UNKNOWN
+    file_type: FileTypes = FileTypes.UNKNOWN
     name: list[str] = field(default_factory=list)
     action: Actions = Actions.UNKNOWN
     dir_inode: int = 0
@@ -130,6 +153,7 @@ class TimelineEventInfo:
     flags: int = 0
     symlink_target: str = ""
     extended_attributes: list[ExtendedAttribute] = field(default_factory=list)
+    device_number: DeviceNumber = field(default_factory=DeviceNumber)
     info: str = ""
 
     def __str__(self) -> str:
@@ -145,6 +169,8 @@ class TimelineEventInfo:
                 result[tl_field] = value.name
             elif isinstance(value, list) and all(isinstance(item, ExtendedAttribute) for item in value):
                 result[tl_field] = [item.to_dict() for item in value]
+            elif isinstance(value, DeviceNumber):
+                result[tl_field] = value.to_dict()
             else:
                 result[tl_field] = value
         return result
@@ -176,7 +202,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
     @staticmethod
     def _compare_entry_fields(current_entry: U, new_entry: U) -> list[tuple[str, any, any]]:
-        differences = []
+        differences: list[tuple] = []
         for entry_field in current_entry.__dataclass_fields__:
             current_value = getattr(current_entry, entry_field)
             new_value = getattr(new_entry, entry_field)

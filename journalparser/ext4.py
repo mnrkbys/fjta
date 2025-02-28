@@ -1,5 +1,5 @@
 #
-# Copyright 2024 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
@@ -13,7 +13,12 @@
 # https://github.com/torvalds/linux/blob/master/include/linux/jbd2.h
 # https://github.com/torvalds/linux/blob/master/fs/ext4/namei.c
 # https://github.com/torvalds/linux/blob/master/fs/ext4/ext4.h
+# https://righteousit.com/wp-content/uploads/2024/04/understanding-ext4-part-1-extents.pdf
 # https://righteousit.com/wp-content/uploads/2024/04/understanding-ext4-part-2-timestamps.pdf
+# https://righteousit.com/wp-content/uploads/2024/04/understanding-ext4-part-3-extent-trees.pdf
+# https://righteousit.com/wp-content/uploads/2024/04/understanding-ext4-part-4-demolition-derby.pdf
+# https://righteousit.com/wp-content/uploads/2024/04/understanding-ext4-part-5-large-extents.pdf
+# https://righteousit.com/wp-content/uploads/2024/04/understanding-ext4-part-6-directories.pdf
 # https://righteousit.com/2024/09/04/more-on-ext4-timestamps-and-timestomping/
 
 import copy
@@ -26,13 +31,25 @@ from datetime import UTC, datetime
 import pytsk3
 from construct import ConstError, Container, RangeError, StreamError
 
-from .common import Actions, EntryInfo, ExtendedAttribute, FileTypes, JournalParserCommon, JournalTransaction, TimelineEventInfo
-from .structs import ext4_structs
-from .structs.ext4_structs import (
+from journalparser.common import (
+    Actions,
+    DeviceNumber,
+    EntryInfo,
+    EntryInfoSource,
+    ExtendedAttribute,
+    FileTypes,
+    JournalParserCommon,
+    JournalTransaction,
+    TimelineEventInfo,
+)
+from journalparser.structs import ext4_structs
+from journalparser.structs.ext4_structs import (
     commit_header,
     dx_root,
     ext4_dir_entry_2,
     ext4_dir_entry_tail,
+    ext4_extent,
+    ext4_extent_header,
     ext4_group_desc,
     ext4_inode,
     ext4_superblock_s,
@@ -65,6 +82,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
     commit_time: int = 0
     commit_time_nanoseconds: int = 0
     external_ea_blocks: dict[int, list[ExtendedAttribute]] = field(default_factory=dict)  # dict[block_num, list[ExtendedAttribute]]
+    symlink_extents: dict[int, str] = field(default_factory=dict)  # dict[block_num, symlink_target]
 
     def set_commit_time(self, commit: Container | None) -> None:
         if commit:
@@ -81,18 +99,22 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
             self.entries[inode_num] = EntryInfoExt4()
         self.entries[inode_num].parent_inode = parent_inode_num
 
-    def _retrieve_symlink_target(self, i_block: list[int]) -> str:
-        # TODO: Implement support for extents in i_block
-        if i_block[0].to_bytes(4, byteorder="little")[0:2] == b"\xf3\x0a":  # ext4_extent_header.eh_magic == 0xF30A
-            print("Not supporting extents in i_block")
-            return "NOT SUPPORTING EXTENTS"
-        symlink_target = ""
-        for block in i_block:
-            if part := block.to_bytes(4, byteorder="little").decode("utf-8").replace("\x00", ""):
-                symlink_target += part
-            else:
-                break
-        return symlink_target
+    def _retrieve_symlink_target(self, i_block: bytes) -> int | str:
+        try:
+            extent_header = ext4_extent_header.parse(i_block[0 : ext4_extent_header.sizeof()])
+            if extent_header.eh_entries != 1:
+                return "Not supporting multi extents in i_block"
+            extent = ext4_extent.parse(i_block[ext4_extent_header.sizeof() : ext4_extent_header.sizeof() + ext4_extent.sizeof()])
+            return extent.ee_start_hi << 32 | extent.ee_start_lo
+        except ConstError:
+            # symlink_target = ""
+            # for block in i_block:
+            #     if part := block.to_bytes(4, byteorder="little").decode("utf-8").replace("\x00", ""):
+            #         symlink_target += part
+            #     else:
+            #         break
+            # return symlink_target
+            return i_block.decode("utf-8").replace("\x00", "")
 
     @staticmethod
     def _calc_extra_time(time: int, extra_time: int) -> tuple[int, int]:
@@ -147,7 +169,11 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
                 entry.file_type = FileTypes.SOCKET
             case ext4_structs.S_IFLNK:
                 entry.file_type = FileTypes.SYMBOLIC_LINK
-                entry.symlink_target = self._retrieve_symlink_target(inode.i_block)
+                result = self._retrieve_symlink_target(inode.i_block)
+                if isinstance(result, str):
+                    entry.symlink_target = result
+                elif isinstance(result, int):
+                    entry.symlink_block_num = result
         entry.mode = inode.i_mode & 0o7777  # Remove file type bits
         entry.uid = inode.i_osd2.l_i_uid_high << 16 | inode.i_uid
         entry.gid = inode.i_osd2.l_i_gid_high << 16 | inode.i_gid
@@ -158,6 +184,12 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry.flags = inode.i_flags
         entry.external_ea_block_num = inode.i_osd2.l_i_file_acl_high << 32 | inode.i_file_acl_lo
         entry.extended_attributes = eattrs
+        if inode.i_mode & 0xF000 in (ext4_structs.S_IFCHR, ext4_structs.S_IFBLK):
+            device_num = int.from_bytes(inode.i_block[:2], byteorder="little")
+            major = device_num >> 8
+            minor = device_num & 0xFF
+            entry.device_number = DeviceNumber(major, minor)
+        entry.entryinfo_source |= EntryInfoSource.INODE
 
     def set_dir_entry_info(self, inode_num: int, dir_entry: Container) -> None:
         if not self.entries.get(inode_num):
@@ -187,6 +219,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
                 case ext4_structs.EXT4_FT_SYMLINK:
                     entry.file_type = FileTypes.SYMBOLIC_LINK
 
+        entry.entryinfo_source |= EntryInfoSource.DIR_ENTRY
 
 class JournalDescriptorNotFoundError(Exception):
     pass
@@ -433,32 +466,36 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                     for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table, data_block):
                                         self.transactions[transaction_id].set_inode_info(inode_num, inode, eattrs)
                                 else:
-                                    # Parse as external extended attributes
                                     try:
-                                        _ = ext4_xattr_header.parse(data_block)
-                                        self.transactions[transaction_id].external_ea_blocks[t_blocknr] = self._parse_ea_entries(
-                                            data_block,
-                                            ext4_xattr_header.sizeof(),
-                                        )
-                                    # Parse as directory entries
-                                    except ConstError:
-                                        dir_inode = 0
-                                        parent_inode = 0
-                                        for dir_entry in self._parse_directory_entries(data_block):
-                                            if dir_entry:
-                                                if dir_entry.name.decode("utf-8") == ".":
-                                                    dir_inode = dir_entry.inode
-                                                    continue
-                                                if dir_entry.name.decode("utf-8") == "..":
-                                                    parent_inode = dir_entry.inode
-                                                    continue
-                                                # if dir_entry.file_type == ext4_structs.EXT4_FT_DIR:
-                                                #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, parent_inode)
-                                                # else:
-                                                #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
-                                                self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
-                                                self.transactions[transaction_id].set_parent_inode(dir_entry.inode, parent_inode)
-                                                self.transactions[transaction_id].set_dir_entry_info(dir_entry.inode, dir_entry)
+                                        symlink_target = data_block.decode("utf-8").replace("\x00", "")
+                                        self.transactions[transaction_id].symlink_extents[t_blocknr] = symlink_target
+                                    except UnicodeDecodeError:
+                                        # Parse as external extended attributes
+                                        try:
+                                            _ = ext4_xattr_header.parse(data_block)
+                                            self.transactions[transaction_id].external_ea_blocks[t_blocknr] = self._parse_ea_entries(
+                                                data_block,
+                                                ext4_xattr_header.sizeof(),
+                                            )
+                                        # Parse as directory entries
+                                        except ConstError:
+                                            dir_inode = 0
+                                            parent_inode = 0
+                                            for dir_entry in self._parse_directory_entries(data_block):
+                                                if dir_entry:
+                                                    if dir_entry.name.decode("utf-8") == ".":
+                                                        dir_inode = dir_entry.inode
+                                                        continue
+                                                    if dir_entry.name.decode("utf-8") == "..":
+                                                        parent_inode = dir_entry.inode
+                                                        continue
+                                                    # if dir_entry.file_type == ext4_structs.EXT4_FT_DIR:
+                                                    #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, parent_inode)
+                                                    # else:
+                                                    #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
+                                                    self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
+                                                    self.transactions[transaction_id].set_parent_inode(dir_entry.inode, parent_inode)
+                                                    self.transactions[transaction_id].set_dir_entry_info(dir_entry.inode, dir_entry)
 
                     case ext4_structs.JBD2_COMMIT_BLOCK:
                         # print("JBD2_COMMIT_BLOCK")
@@ -482,8 +519,6 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         raise TypeError(msg)
 
             except ConstError:
-                # print(f"block_num: {block_num} DATA BLOCK?")
-                # print(f"data: {data[0:0x10]}")
                 pass
 
             block_num += 1
@@ -671,6 +706,7 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     flags=flags if flags != -1 else current_entry.flags,
                     symlink_target=symlink_target if symlink_target else current_entry.symlink_target,
                     extended_attributes=eattrs if eattrs else current_entry.extended_attributes,
+                    device_number=current_entry.device_number,
                     info=info,
                 )
 
@@ -699,15 +735,13 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     mtime_f = float(f"{working_entries[inode_num].mtime}.{working_entries[inode_num].mtime_nanoseconds:09d}")
                     crtime_f = float(f"{working_entries[inode_num].crtime}.{working_entries[inode_num].crtime_nanoseconds:09d}")
 
-                    # Creation of files in a directory updates the directory's ctime and mtime,
-                    # so a directory created almost simultaneously with a large number of files may not be detected.
-                    # Under the following conditions, differences of less than 1 second are ignored.
+                    # - Creation of files in a directory updates the directory's ctime and mtime,
+                    #   so a directory created almost simultaneously with a large number of files may not be detected.
+                    #   Under the following conditions, differences of less than 1 second are ignored.
+                    # - In some cases, such as creating symlinks, only atime is updated. So, it is removed from the condition.
                     if (
                         working_entries[inode_num].crtime != 0
-                        and working_entries[inode_num].atime
-                        == working_entries[inode_num].ctime
-                        == working_entries[inode_num].mtime
-                        == working_entries[inode_num].crtime
+                        and working_entries[inode_num].ctime == working_entries[inode_num].mtime == working_entries[inode_num].crtime
                     ):
                         action |= Actions.CREATE
                         info = self._append_msg(
@@ -747,6 +781,10 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         action |= Actions.CHANGE_FLAGS
                         info = self._append_msg(info, "Flags: Immutable")
 
+                    # Copy symlink target to working entry
+                    if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
+                        working_entries[inode_num].symlink_target = symlink_target
+
                     if action != Actions.UNKNOWN:
                         timeline_events.append(
                             TimelineEventInfo(
@@ -769,9 +807,28 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                 flags=working_entries[inode_num].flags,
                                 symlink_target=working_entries[inode_num].symlink_target,
                                 extended_attributes=working_entries[inode_num].extended_attributes,
+                                device_number=working_entries[inode_num].device_number,
                                 info=info,
                             ),
                         )
+
+                # Sometimes transaction.entries[inode_num] has information only from an inode and does not have information from directory entries.
+                # In such cases, transaction.entries[inode_num].name is updated with working_entries[inode_num].name.
+                if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.INODE:
+                    transaction.entries[inode_num].name = copy.deepcopy(working_entries[inode_num].name)
+                    transaction.entries[inode_num].entryinfo_source |= EntryInfoSource.WORKING_ENTRY
+                # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
+                # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
+                elif transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
+                    orig_name_field = transaction.entries[inode_num].name
+                    transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
+                    transaction.entries[inode_num].name = orig_name_field
+                    transaction.entries[inode_num].entryinfo_source |= EntryInfoSource.WORKING_ENTRY
+                # Copy symlink target to current entry
+                if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
+                    if not transaction.entries.get(inode_num):
+                        transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
+                    transaction.entries[inode_num].symlink_target = symlink_target
                 # Copy external extended attributes to current entry
                 if eattrs := transaction.external_ea_blocks.get(working_entries[inode_num].external_ea_block_num):
                     if not transaction.entries.get(inode_num):

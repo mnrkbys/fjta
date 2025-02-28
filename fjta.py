@@ -3,7 +3,7 @@
 # fjta.py
 # Forensic Journal Timeline Analyzer (FJTA) can parse and analyze journal log of EXT4 and XFS file systems.
 #
-# Copyright 2024 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import sys
 
 from journalparser import journalparser
 
-VERSION = "20250225"
+VERSION = "20250228"
 
 
 def parse_arguments() -> argparse.Namespace:

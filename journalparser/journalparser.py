@@ -1,6 +1,13 @@
+#
+# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+#
+#    This file is part of Forensic Journal Timeline Analyzer (FJTA).
+#    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
+#
+
 import pytsk3
 
-from . import ext4, xfs
+from journalparser import ext4, xfs
 
 
 class JournalParser:
@@ -12,7 +19,7 @@ class JournalParser:
         elif self.fs_info.info.ftype == 0x80000:  # pytsk3.TSK_FS_TYPE_XFS:
             self.journal_parser = xfs.JournalParserXfs(self.img_info, self.fs_info)
         else:
-            msg = "File system is not supported."
+            msg = "Unsupported file system is contained."
             raise TypeError(msg)
 
     def parse_journal(self) -> None:

@@ -1,5 +1,5 @@
 #
-# Copyright 2024 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
@@ -378,6 +378,9 @@ JBD2_FEATURE_INCOMPAT_CSUM_V3 = 0x00000010
 JBD2_FEATURE_INCOMPAT_FAST_COMMIT = 0x00000020
 
 
+#
+# inode structures
+#
 i_osd1_linux = Struct(
     "l_i_version" / Int32ub,
 )
@@ -404,7 +407,8 @@ ext4_inode = Struct(
     "i_blocks_lo" / Int32ul,  # 0x1C: Lower 32-bits of block count
     "i_flags" / Int32ul,  # 0x20: Inode flags
     "i_osd1" / i_osd1_linux,  # 0x24: OS dependent 1
-    "i_block" / Array(15, Int32ul),  # 0x28: Block map or extent tree
+    # "i_block" / Array(15, Int32ul),  # 0x28: Block map or extent tree
+    "i_block" / Bytes(60),  # 0x28: Block map or extent tree
     "i_generation" / Int32ul,  # 0x64: File version (for NFS)
     "i_file_acl_lo" / Int32ul,  # 0x68: Lower 32-bits of extended attribute block
     "i_size_high" / Int32ul,  # 0x6C: Upper 32-bits of file/directory size
@@ -477,6 +481,36 @@ EXT4_RESERVED_FL = 0x80000000  # Reserved for ext4 library
 # Aggregate flags
 EXT4_FL_USER_VISIBLE = 0x705BDFFF  # User-visible flags
 EXT4_FL_USER_MODIFIABLE = 0x604BC0FF  # User-modifiable flags
+
+
+#
+# Extent tree
+#
+ext4_extent_header = Struct(
+    "eh_magic" / Const(b"\x0a\xf3"),  # 0x0: Magic number, 0xF30A
+    "eh_entries" / Int16ul,  # 0x2: Number of valid entries following the header
+    "eh_max" / Int16ul,  # 0x4: Maximum number of entries that could follow the header
+    "eh_depth" / Int16ul,  # 0x6: Depth of this extent node in the extent tree
+    "eh_generation" / Int32ul,  # 0x8: Generation of the tree
+)
+
+ext4_extent_idx = Struct(
+    "ei_block" / Int32ul,  # 0x0: This index node covers file blocks from 'block' onward
+    "ei_leaf_lo" / Int32ul,  # 0x4: Lower 32-bits of the block number of the extent node that is the next level lower in the tree
+    "ei_leaf_hi" / Int16ul,  # 0x8: Upper 16-bits of the previous field
+    "ei_unused" / Int16ul,  # 0xA: Unused
+)
+
+ext4_extent = Struct(
+    "ee_block" / Int32ul,  # 0x0: First file block number that this extent covers
+    "ee_len" / Int16ul,  # 0x4: Number of blocks covered by extent
+    "ee_start_hi" / Int16ul,  # 0x6: Upper 16-bits of the block number to which this extent points
+    "ee_start_lo" / Int32ul,  # 0x8: Lower 32-bits of the block number to which this extent points
+)
+
+ext4_extent_tail = Struct(
+    "eb_checksum" / Int32ul,  # 0x0: Checksum of the extent block, crc32c(uuid+inum+igeneration+extentblock)
+)
 
 
 #

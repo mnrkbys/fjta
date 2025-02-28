@@ -12,6 +12,41 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 - **Suspicious Activity Detection**: Identifies deleted files and potentially tampered operations.
 - **Cross-Platform Compatibility**: Written in Python, allowing analysis on any operating system.
 
+> [!IMPORTANT]
+>
+> - FJTA only supports EXT4 and XFS version 5 (inode version 3).
+> - Only EXT4 journals stored with "data=ordered" are supported.
+> - External journals are not supported.
+
+## Analyzable artifacts within filesystem journals
+
+| Artifacts                        |  EXT4  |  XFS  |
+|----------------------------------|:------:|:-----:|
+| inode                            | ✅     | ✅    |
+| Few files in directory entries   | ✅     | ✅    |
+| Many files in directory entries  | ✅     | ✅    |
+| Short symlink target names       | ✅     | ✅    |
+| Long symlink target names        | ✅     | ❌    |
+| Short extended attributes        | ✅     | ✅    |
+| Long extended attributes         | ✅     | ❌    |
+| Device number                    | ✅     | ✅    |
+| Year 2038 problem                | ✅     | ✅    |
+
+## Detectable activities
+
+| Activities                         |  EXT4  |  XFS  |
+|------------------------------------|:------:|:-----:|
+| Creating files                     | ✅     | ✅    |
+| Deleting files                     | ❌     | ❌    |
+| Modification of crtime             | ✅     | ✅    |
+| Modification of atime              | ✅     | ✅    |
+| Modification of ctime              | ✅     | ✅    |
+| Modification of mtime              | ✅     | ✅    |
+| Timestomping (time manipulation)   | ✅     | ✅    |
+| File size change                   | ✅     | ✅    |
+| Modification of extended attributes| ✅     | ✅    |
+| Set immutable flag                 | ✅     | ✅    |
+
 ## Requirements
 
 - Python 3.12 or later
@@ -31,7 +66,7 @@ git clone https://github.com/mnrkbys/fjta.git
 python ./fjta.py -i ~/ext4.img | jq
 ```
 
-## Execution Results
+## Execution results
 
 ```bash
 {

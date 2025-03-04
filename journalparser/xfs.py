@@ -217,8 +217,8 @@ class LogRecordNotFoundError(Exception):
 
 
 class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info) -> None:
-        super().__init__(img_info, fs_info)
+    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, offset: int, debug: bool = False) -> None:
+        super().__init__(img_info, fs_info, offset, debug)
 
     def _convert_block_to_absaddr(self, block_num: int, log2val: int) -> int:
         if self.sb_agblocks:
@@ -231,7 +231,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         return JournalTransactionXfs(tid)
 
     def _parse_xfs_superblock(self) -> None:
-        self.xfs_superblock = xfs_dsb.parse(self.img_info.read(0x0, 0x200))
+        self.xfs_superblock = xfs_dsb.parse(self.img_info.read(self.offset + 0x0, 0x200))
+        self.dbg_print(f"XFS superblock: {self.xfs_superblock}")
         # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_format.h#L299 - XFS_SB_VERSION_NUM()
         if sb_ver := self.xfs_superblock.sb_versionnum & 0xF != 5:
             msg = f"XFS version: {sb_ver}. Only XFS version 5 is supported."
@@ -244,26 +245,27 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
     def _find_first_log_record(self) -> int:
         xfs_sb = self.xfs_superblock
         for log_rec_addr in range(self.sb_logstart_addr, self.sb_logstart_addr + xfs_sb.sb_logblocks * self.block_size):
-            data = self.img_info.read(log_rec_addr, self.block_size)
+            data = self.img_info.read(self.offset + log_rec_addr, self.block_size)
             xlog_record_header = xlog_rec_header.parse(data)
             if xlog_record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
+                self.dbg_print(f"First log record: {log_rec_addr}")
                 return log_rec_addr
             log_rec_addr += 4
         return -1
 
     def _read_journal_data(self, journal_addr: int, read_len: int = 4096) -> bytes:
         xfs_sb = self.xfs_superblock
-        if journal_addr < self.sb_logstart_addr:
+        if journal_addr < self.offset + self.sb_logstart_addr:
             return b""
         journal_data_len = xfs_sb.sb_logblocks * self.block_size
-        read_pos = (journal_addr - self.sb_logstart_addr) % journal_data_len
+        read_pos = ((journal_addr - self.offset) - self.sb_logstart_addr) % journal_data_len
         if self.sb_logstart_addr + read_pos + read_len > self.sb_logstart_addr + journal_data_len:
             read_len_1 = self.sb_logstart_addr + journal_data_len - self.sb_logstart_addr + read_pos
             read_len_2 = read_len - read_len_1
-            data_1 = self.img_info.read(self.sb_logstart_addr + read_pos, read_len_1)
-            data_2 = self.img_info.read(self.sb_logstart_addr, read_len_2)
+            data_1 = self.img_info.read(self.offset + self.sb_logstart_addr + read_pos, read_len_1)
+            data_2 = self.img_info.read(self.offset + self.sb_logstart_addr, read_len_2)
             return data_1 + data_2
-        return self.img_info.read(self.sb_logstart_addr + read_pos, read_len)
+        return self.img_info.read(self.offset + self.sb_logstart_addr + read_pos, read_len)
 
     @staticmethod
     def _find_next_xlog_op_header(tid: int, data: bytes) -> int:
@@ -284,7 +286,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 break
             if op_header.oh_len == 1:  # Why is oh_len sometimes 1?
                 if guessed_oh_len := self._find_next_xlog_op_header(op_header.oh_tid, data[idx + xlog_op_header.sizeof() :]):
-                    # print(f"oh_len = 1, guessed_oh_len = {guessed_oh_len}")
+                    self.dbg_print(f"Found next xlog_op_header (guessed_oh_len): {guessed_oh_len}")
                     op_header.oh_len = guessed_oh_len
                 else:
                     op_header.oh_len = 0x18  # I have confirmed that the actual length is 0x18. However, different lengths may be used in other cases.
@@ -353,7 +355,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         self,
         log_ops: list[XfsLogOperation],
     ) -> tuple[Container | None, list[Container], list[ExtendedAttribute], str, DeviceNumber, int]:
-        # transaction = list(self.transactions.values())[-1]  # The latest transaction must be the current transaction
         inode_log_format_64 = self.xfs_inode_log_format_64.parse(log_ops[0].item_data)
         idx = 1  # Processing from the second log operation
         inode = None
@@ -372,31 +373,18 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 #     If XFS_ILOG_CORE is set in ilf_fields, the corresponding data buffer must be in the format struct xfs_icdinode,
                 #     which has the same format as the first 96 bytes of an inode, but is recorded in host byte order.
                 if inode.di_magic not in (xfs_structs.XFS_DINODE_MAGIC, 0x0000):
-                    print("Invalid inode magic number: 0x{inode.di_magic:04x}")
-                # print(f"inode: {inode.di_ino}, mode: {inode.di_mode:04o}")
-                # print(
-                #     f"atime: {inode.di_mtime.bigtime}, mtime: {inode.di_mtime.bigtime}, ctime: {inode.di_ctime.bigtime}, crtime: {inode.di_crtime.bigtime}",
-                # )
+                    msg = "Invalid inode magic number: 0x{inode.di_magic:04x}"
+                    raise ValueError(msg)
                 idx += 1
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_DDATA:
                 if inode and inode.di_format == xfs_structs.XFS_DINODE_FMT_LOCAL:
                     if inode.di_mode & xfs_structs.S_IFDIR:
-                        # for entry in self._parse_directory_entries_shortform(log_ops[idx], inode_log_format_64.ilf_dsize):
-                        #     print(entry)
                         parent_inode, dir_entries = self._parse_directory_entries_shortform(log_ops[idx], inode_log_format_64.ilf_dsize)
-                        # dir_inode = 0
-                        # for dir_entry in dir_entries:
-                        #     if dir_entry.name == b".":
-                        #         dir_inode = dir_entry.inumber
-                        #         continue
-                        #     if dir_entry.ftype == xfs_structs.XFS_DIR3_FT_DIR:
-                        #         transaction.set_dir_inode(dir_entry.inumber, parent_inode)
-                        #     else:
-                        #         transaction.set_dir_inode(dir_entry.inumber, dir_inode)
-                        #     transaction.set_parent_inode(dir_entry.inumber, parent_inode)
-                        #     transaction.set_dir_entry_info(dir_entry.inumber, dir_entry)
+                        self.dbg_print(f"Parent inode: {parent_inode}")
+                        self.dbg_print(f"Directory entries (short form): {dir_entries}")
                     elif inode.di_magic == 0x0000 and inode.di_mode == 0x100:  # Seems a symlink. Is this condition correct?
                         symlink_target = log_ops[idx].item_data.decode("utf-8").replace("\x00", "")
+                        self.dbg_print(f"Symlink target: {symlink_target}")
                 idx += 1
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_DEXT:
                 idx += 1
@@ -416,6 +404,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 idx += 1
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ADATA:
                 eattrs = self._parse_eattrs_shortform(log_ops[idx], inode_log_format_64.ilf_asize)
+                self.dbg_print(f"Extended attributes (short form): {eattrs}")
                 idx += 1
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_AEXT:
                 idx += 1
@@ -428,9 +417,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         idx = 0
         while idx < len(data):
             dir2_data_entry = xfs_dir2_data_entry.parse(data[idx:])
-            if (dir2_data_entry.inumber >> 48) == 0xFFFF:
-                break
             idx += 0x8 + 0x1 + dir2_data_entry.namelen + 0x1 + (4 - (dir2_data_entry.namelen % 4)) + 0x2
+            if (dir2_data_entry.inumber >> 48) == 0xFFFF:  # Deleted directory entry's inode number starts with 0xFFFF
+                # break
+                continue
             yield dir2_data_entry
 
     def _parse_buffer_writes(self, log_ops: list[XfsLogOperation]) -> Generator[tuple[int, Container | None], None, None]:
@@ -459,7 +449,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
     def parse_journal(self) -> None:
         self._parse_xfs_superblock()
 
-        first_log_rec_addr = self._find_first_log_record()
+        first_log_rec_addr = self._find_first_log_record()  # This variable reflects the offset.
         if first_log_rec_addr == -1:
             msg = "Failed to find the first log record."
             raise LogRecordNotFoundError(msg)
@@ -546,7 +536,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                                             case xfs_structs.XFS_LI_BUF:  # 0x123C
                                                 op_size = log_item.size
                                                 parent_inode = 0
+                                                self.dbg_print("Directory entry:")
                                                 for dir_inode, dir_entry in self._parse_buffer_writes(log_ops[idx : idx + op_size]):
+                                                    self.dbg_print(dir_entry)
                                                     # if dir_entry.name == b".":
                                                     #     dir_inode = dir_entry.inumber
                                                     #     continue
@@ -581,6 +573,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 journal_addr += record_header.h_len
             else:
                 # print(f"===== 0x{journal_addr:0x}: Empty log record =====")
+                self.dbg_print("Empty log record")
                 journal_addr += 0x200
                 # If the first empty log record is found, the loop will be terminated.
                 # This is temporarily implemented to prevent long loops. This will be removed later.

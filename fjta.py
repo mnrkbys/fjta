@@ -24,7 +24,7 @@ import sys
 
 from journalparser import journalparser
 
-VERSION = "20250228"
+VERSION = "20250304"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -38,6 +38,19 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         help="Path to a disk image file.",
     )
+    parser.add_argument(
+        "-s",
+        "--offset",
+        type=int,
+        default=0,
+        help="Filesystem offset in bytes. (Default: 0)",
+    )
+    # parser.add_argument(
+    #     "-o",
+    #     "--output",
+    #     type=str,
+    #     help="Path to an output file. (Default: stdout)",
+    # )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -59,7 +72,7 @@ def main() -> None:
         sys.exit(1)
 
     full_path = os.path.abspath(os.path.expanduser(args.image))
-    parser = journalparser.JournalParser(full_path)
+    parser = journalparser.JournalParser(full_path, args.offset, args.debug)
     parser.parse_journal()
     parser.timeline()
 

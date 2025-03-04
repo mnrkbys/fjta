@@ -12,12 +12,6 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 - **Suspicious Activity Detection**: Identifies deleted files and potentially tampered operations.
 - **Cross-Platform Compatibility**: Written in Python, allowing analysis on any operating system.
 
-> [!IMPORTANT]
->
-> - FJTA only supports EXT4 and XFS version 5 (inode version 3).
-> - Only EXT4 journals stored with "data=ordered" are supported.
-> - External journals are not supported.
-
 ## Analyzable artifacts within filesystem journals
 
 | Artifacts                        |  EXT4  |  XFS  |
@@ -50,7 +44,7 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 ## Requirements
 
 - Python 3.12 or later
-- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) (develop branch is needed)
+- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) (At a minimum, it must be compiled with the TSK develop branch from commit hash a90fd0d9ba31a3046f042570bc874536667c6f16 or later.)
 - [pytsk](https://github.com/py4n6/pytsk) (needs to compile with TSK's develop branch)
 - [Construct](https://github.com/construct/construct)
 
@@ -127,7 +121,11 @@ Contributions are welcome! If you wish to contribute, please fork the repository
 
 ## Limitations
 
-This tool is still under development, so some filesystem information may not be available for analysis. Additionally, the output format is subject to change.
+- FJTA is still under development, so some filesystem information may not be available for analysis. Additionally, the output format is subject to change.
+- FJTA only supports RAW disk images.
+- FJTA only supports EXT4 and XFS version 5 (inode version 3).
+- Only EXT4 journals stored with "data=ordered" are supported.
+- External journals are not supported.
 
 ## Author
 

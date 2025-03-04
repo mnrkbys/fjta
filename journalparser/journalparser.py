@@ -11,13 +11,13 @@ from journalparser import ext4, xfs
 
 
 class JournalParser:
-    def __init__(self, img_file: str) -> None:
+    def __init__(self, img_file: str, offset: int = 0, debug: bool = False) -> None:
         self.img_info = pytsk3.Img_Info(img_file)
-        self.fs_info = pytsk3.FS_Info(self.img_info)
+        self.fs_info = pytsk3.FS_Info(self.img_info, offset)
         if self.fs_info.info.ftype == pytsk3.TSK_FS_TYPE_EXT4:
-            self.journal_parser = ext4.Ext4JournalParser(self.img_info, self.fs_info)
+            self.journal_parser = ext4.JournalParserExt4(self.img_info, self.fs_info, offset, debug)
         elif self.fs_info.info.ftype == 0x80000:  # pytsk3.TSK_FS_TYPE_XFS:
-            self.journal_parser = xfs.JournalParserXfs(self.img_info, self.fs_info)
+            self.journal_parser = xfs.JournalParserXfs(self.img_info, self.fs_info, offset, debug)
         else:
             msg = "Unsupported file system is contained."
             raise TypeError(msg)

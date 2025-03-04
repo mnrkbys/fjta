@@ -114,7 +114,10 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
             #     else:
             #         break
             # return symlink_target
-            return i_block.decode("utf-8").replace("\x00", "")
+            try:
+                return i_block.decode("utf-8").replace("\x00", "")
+            except UnicodeDecodeError:
+                return i_block.hex()
 
     @staticmethod
     def _calc_extra_time(time: int, extra_time: int) -> tuple[int, int]:
@@ -225,17 +228,21 @@ class JournalDescriptorNotFoundError(Exception):
     pass
 
 
-class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt4]):
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info) -> None:
-        super().__init__(img_info, fs_info)
-        self.transactions: dict[int, JournalTransactionExt4] = {}  # dict[transaction_id, JournalTransactionExt4]
+class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt4]):
+    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, offset: int = 0, debug: bool = False) -> None:
+        super().__init__(img_info, fs_info, offset, debug)
 
     def _create_transaction(self, tid: int) -> JournalTransactionExt4:
         return JournalTransactionExt4(tid)
 
     def _parse_ext4_superblock(self) -> None:
-        self.ext4_superblock = ext4_superblock_s.parse(self.img_info.read(0x400, ext4_superblock_s.sizeof()))
-        self.s_inode_size = self.ext4_superblock.s_inode_size
+        self.ext4_superblock = ext4_superblock_s.parse(self.img_info.read(self.offset + 0x400, ext4_superblock_s.sizeof()))
+        if self.ext4_superblock.s_magic == 0xEF53:  # EXT4 superblock magic number is 0xEF53
+            self.dbg_print(f"EXT4 superblock: {self.ext4_superblock}")
+            self.s_inode_size = self.ext4_superblock.s_inode_size
+        else:
+            msg = f"Bad magic number in EXT4 superblock: 0x{self.ext4_superblock.s_magic:x}"
+            raise ValueError(msg)
 
     def _parse_block_group_descriptors(self) -> None:
         img_info = self.img_info
@@ -243,7 +250,7 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         block_idx = 1  # Skip first block (Group 0 padding + EXT4 superblock)
         found_empty_bg_desc = False
         while not found_empty_bg_desc:
-            bg_desc_block_data = img_info.read(block_idx * self.block_size, self.block_size)
+            bg_desc_block_data = img_info.read(self.offset + block_idx * self.block_size, self.block_size)
             bg_desc_entry_idx = 0
             while bg_desc_entry_idx < self.block_size:
                 bg_desc_entry_data = bg_desc_block_data[bg_desc_entry_idx : bg_desc_entry_idx + ext4_group_desc.sizeof()]
@@ -252,6 +259,7 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     found_empty_bg_desc = True
                     break
                 bg_desc = ext4_group_desc.parse(bg_desc_entry_data)
+                self.dbg_print(f"Block group descriptor: {bg_desc}")
                 self.bg_descriptors.append(bg_desc)
                 bg_desc_entry_idx += ext4_group_desc.sizeof()
 
@@ -260,9 +268,14 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     def _retrieve_inode_tables(self) -> None:
         ext4_sb = self.ext4_superblock
         inode_tables: list[BgInodeTable] = []
+        enable_64bit_size_block = self.ext4_superblock.s_feature_incompat & ext4_structs.EXT4_FEATURE_INCOMPAT_64BIT
         for bg_desc in self.bg_descriptors:
-            inode_table_head = bg_desc.bg_inode_table_hi << 32 | bg_desc.bg_inode_table_lo
+            if enable_64bit_size_block:
+                inode_table_head = bg_desc.bg_inode_table_hi << 32 | bg_desc.bg_inode_table_lo
+            else:
+                inode_table_head = bg_desc.bg_inode_table_lo
             inode_table_len = math.ceil(ext4_sb.s_inodes_per_group * ext4_sb.s_inode_size / 2 ** (10 + ext4_sb.s_log_block_size))
+            self.dbg_print(f"Block group inode table: {inode_table_head}, {inode_table_len}")
             inode_tables.append(BgInodeTable(inode_table_head, inode_table_len))
         self.inode_tables = inode_tables
 
@@ -285,13 +298,14 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     def _parse_journal_superblock(self) -> None:
         data = self.journal_file.read_random(0, self.block_size)
         self.journal_superblock = journal_superblock_s.parse(data)
+        self.dbg_print(f"Journal superblock: {self.journal_superblock}")
         self.jbd2_feature_incompat_revoke = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_REVOKE)
         self.jbd2_feature_incompat_64bit = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_64BIT)
         self.jbd2_feature_incompat_csum_v2 = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_CSUM_V2)
         self.jbd2_feature_incompat_csum_v3 = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_CSUM_V3)
-        if not (self.jbd2_feature_incompat_csum_v2 or self.jbd2_feature_incompat_csum_v3):
-            msg = f"Unknown feature incompat value: {self.journal_superblock.s_feature_incompat}"
-            raise ValueError(msg)
+        # if not (self.jbd2_feature_incompat_csum_v2 or self.jbd2_feature_incompat_csum_v3):
+        #     msg = f"Unknown feature incompat value: {self.journal_superblock.s_feature_incompat}"
+        #     raise ValueError(msg)
 
     def _find_first_descriptor_block(self) -> int:
         journal_sb = self.journal_superblock
@@ -299,25 +313,48 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             data = self.journal_file.read_random(block_num * journal_sb.s_blocksize, journal_sb.s_blocksize)
             block_header = journal_header_s.parse(data)
             if block_header.h_blocktype == ext4_structs.JBD2_DESCRIPTOR_BLOCK:
+                self.dbg_print(f"First descriptor block: {block_num}")
                 return block_num
         return -1
 
     def _parse_descriptor_block_tags(self, data: bytes) -> list[Container]:
         idx = journal_header_s.sizeof()  # Skip journal header
         tags = []
-        while idx < len(data):
-            if self.jbd2_feature_incompat_csum_v3:
-                tag_size = journal_block_tag3_s.sizeof()
-                tag_data = data[idx : idx + tag_size]
-            else:
-                tag_size = journal_block_tag_s.sizeof()
-                tag_data = data[idx : idx + tag_size]
+        # while idx < len(data):
+        #     if self.jbd2_feature_incompat_csum_v3:
+        #         tag_size = journal_block_tag3_s.sizeof()
+        #         tag_data = data[idx : idx + tag_size]
+        #     else:
+        #         tag_size = journal_block_tag_s.sizeof()
+        #         tag_data = data[idx : idx + tag_size]
+
+        #     idx += tag_size
+        #     if tag_data == b"\x00" * tag_size:  # Skip empty tag
+        #         continue
+
+        #     tag = journal_block_tag3_s.parse(tag_data) if self.jbd2_feature_incompat_csum_v3 else journal_block_tag_s.parse(tag_data)
+        #     tags.append(tag)
+        #     if tag.t_flags & ext4_structs.JBD2_FLAG_LAST_TAG:
+        #         break
+
+        # tag_size = journal_block_tag3_s.sizeof() if self.jbd2_feature_incompat_csum_v3 else journal_block_tag_s.sizeof()
+        if self.jbd2_feature_incompat_csum_v3:
+            tag_size = journal_block_tag3_s.sizeof()
+            journal_block_tag = journal_block_tag3_s
+        else:
+            tag_size = journal_block_tag_s.sizeof()
+            journal_block_tag = journal_block_tag_s
+
+        while idx <= len(data) - tag_size:
+            # tag_data = data[idx : idx + tag_size] if self.jbd2_feature_incompat_csum_v3 else data[idx : idx + tag_size]
+            tag_data = data[idx : idx + tag_size]
 
             idx += tag_size
             if tag_data == b"\x00" * tag_size:  # Skip empty tag
                 continue
 
-            tag = journal_block_tag3_s.parse(tag_data) if self.jbd2_feature_incompat_csum_v3 else journal_block_tag_s.parse(tag_data)
+            # tag = journal_block_tag3_s.parse(tag_data) if self.jbd2_feature_incompat_csum_v3 else journal_block_tag_s.parse(tag_data)
+            tag = journal_block_tag.parse(tag_data)
             tags.append(tag)
             if tag.t_flags & ext4_structs.JBD2_FLAG_LAST_TAG:
                 break
@@ -363,7 +400,7 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             _ = ext4_xattr_ibody_header.parse(data[idx : idx + ext4_xattr_ibody_header.sizeof()])
             idx += ext4_xattr_ibody_header.sizeof()
             eattrs = self._parse_ea_entries(data[idx:])
-        except ConstError:
+        except (ConstError, StreamError):
             return eattrs
         else:
             return eattrs
@@ -383,8 +420,11 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             while idx < len(data):
                 inode_data = data[idx : idx + self.s_inode_size]
                 # Empty inode (b"\00" * s_inode_size) is not a valid inode. So, it can be ignored probably.
-                if inode_data != b"\x00" * self.s_inode_size:
+                if inode_data != b"\x00" * self.s_inode_size and inode_data != b"\xff" * self.s_inode_size:
                     inode = ext4_inode.parse(inode_data)
+                    if inode.i_mode & 0xF000 < ext4_structs.S_IFIFO or inode.i_mode & 0xF000 > ext4_structs.S_IFSOCK:
+                        idx += self.s_inode_size
+                        continue
                     inode_num = first_inode_in_table + (idx // self.s_inode_size)
                     eattrs = self._parse_ea_in_inode(data[idx + 128 + inode.i_extra_isize : idx + self.s_inode_size])
                     yield inode_num, inode, eattrs
@@ -397,7 +437,7 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             if dir_entry.rec_len == 0:  # rec_len must not be zero
                 break
             idx += dir_entry.rec_len
-            if dir_entry.inode == 0 or dir_entry.name_len == 0:  # Skip an invalid entry
+            if dir_entry.inode == 0 or dir_entry.name_len == 0 or dir_entry.file_type == ext4_structs.EXT4_FT_UNKNOWN:  # Skip an invalid entry
                 continue
             yield dir_entry
 
@@ -448,26 +488,36 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             try:
                 data = self._read_journal_block(block_num)
                 block_header = journal_header_s.parse(data)
+                self.dbg_print(f"Block header: {block_header}")
                 transaction_id = block_header.h_sequence
 
                 match block_header.h_blocktype:
                     case ext4_structs.JBD2_DESCRIPTOR_BLOCK:
-                        # print("JBD2_DESCRIPTOR_BLOCK")
+                        self.dbg_print("JBD2_DESCRIPTOR_BLOCK")
                         self.add_transaction(transaction_id)
+                        self.dbg_print(f"Transaction ID: {transaction_id}")
                         tags = self._parse_descriptor_block_tags(data)
                         if tags:
                             for tag in tags:
-                                t_blocknr = tag.t_blocknr_high << 32 | tag.t_blocknr
+                                self.dbg_print(f"Block tag: {tag}")
+                                if self.jbd2_feature_incompat_64bit:
+                                    t_blocknr = tag.t_blocknr_high << 32 | tag.t_blocknr
+                                else:
+                                    t_blocknr = tag.t_blocknr
                                 block_num += 1
                                 data_block = self._read_journal_block(block_num)
                                 # If block_num is a part of inode table, parse it as inode list.
                                 # If not, parse it as external extended attributes or ext4_dir_entry_2 entries.
                                 if inode_table := self._check_inode_table_range(t_blocknr):
                                     for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table, data_block):
+                                        self.dbg_print(f"Inode number: {inode_num}")
+                                        self.dbg_print(f"Inode: {inode}")
+                                        self.dbg_print(f"Extended attributes: {eattrs}")
                                         self.transactions[transaction_id].set_inode_info(inode_num, inode, eattrs)
                                 else:
                                     try:
                                         symlink_target = data_block.decode("utf-8").replace("\x00", "")
+                                        self.dbg_print(f"Symlink target: {symlink_target}")
                                         self.transactions[transaction_id].symlink_extents[t_blocknr] = symlink_target
                                     except UnicodeDecodeError:
                                         # Parse as external extended attributes
@@ -477,42 +527,49 @@ class Ext4JournalParser(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                                 data_block,
                                                 ext4_xattr_header.sizeof(),
                                             )
+                                            self.dbg_print(
+                                                f"External extended attributes {t_blocknr}: {self.transactions[transaction_id].external_ea_blocks[t_blocknr]}",
+                                            )
                                         # Parse as directory entries
                                         except ConstError:
-                                            dir_inode = 0
-                                            parent_inode = 0
-                                            for dir_entry in self._parse_directory_entries(data_block):
-                                                if dir_entry:
-                                                    if dir_entry.name.decode("utf-8") == ".":
-                                                        dir_inode = dir_entry.inode
-                                                        continue
-                                                    if dir_entry.name.decode("utf-8") == "..":
-                                                        parent_inode = dir_entry.inode
-                                                        continue
-                                                    # if dir_entry.file_type == ext4_structs.EXT4_FT_DIR:
-                                                    #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, parent_inode)
-                                                    # else:
-                                                    #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
-                                                    self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
-                                                    self.transactions[transaction_id].set_parent_inode(dir_entry.inode, parent_inode)
-                                                    self.transactions[transaction_id].set_dir_entry_info(dir_entry.inode, dir_entry)
+                                            try:
+                                                dir_inode = 0
+                                                parent_inode = 0
+                                                self.dbg_print("Directory entry:")
+                                                # self.dbg_print(data_block[:0x30])
+                                                for dir_entry in self._parse_directory_entries(data_block):
+                                                    if dir_entry:
+                                                        self.dbg_print(dir_entry)
+                                                        if dir_entry.name.decode("utf-8") == ".":
+                                                            dir_inode = dir_entry.inode
+                                                            continue
+                                                        if dir_entry.name.decode("utf-8") == "..":
+                                                            parent_inode = dir_entry.inode
+                                                            continue
+                                                        # if dir_entry.file_type == ext4_structs.EXT4_FT_DIR:
+                                                        #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, parent_inode)
+                                                        # else:
+                                                        #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
+                                                        self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
+                                                        self.transactions[transaction_id].set_parent_inode(dir_entry.inode, parent_inode)
+                                                        self.transactions[transaction_id].set_dir_entry_info(dir_entry.inode, dir_entry)
+                                            except UnicodeDecodeError:
+                                                pass
 
                     case ext4_structs.JBD2_COMMIT_BLOCK:
-                        # print("JBD2_COMMIT_BLOCK")
+                        self.dbg_print("JBD2_COMMIT_BLOCK")
                         commit = commit_header.parse(data)
-                        self.transactions[transaction_id].set_commit_time(commit)
+                        if self.transactions.get(transaction_id):
+                            self.transactions[transaction_id].set_commit_time(commit)
 
                     case ext4_structs.JBD2_REVOKE_BLOCK:
-                        # print("JBD2_REVOKE_BLOCK")
-                        pass
+                        self.dbg_print("JBD2_REVOKE_BLOCK")
 
                     case ext4_structs.JBD2_SUPERBLOCK_V1:
-                        # print("JBD2_SUPERBLOCK_V1 is not supported.")
-                        pass
+                        self.dbg_print("JBD2_SUPERBLOCK_V1 is not supported.")
 
                     case ext4_structs.JBD2_SUPERBLOCK_V2:
-                        # print("JBD2_SUPERBLOCK_V2")
-                        pass
+                        self.dbg_print("JBD2_SUPERBLOCK_V2")
 
                     case _:
                         msg = f"Invalid block type: {block_header.h_blocktype}"

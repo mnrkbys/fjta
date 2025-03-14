@@ -44,11 +44,35 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 ## Requirements
 
 - Python 3.12 or later
-- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) (At a minimum, it must be compiled with the TSK develop branch from commit hash a90fd0d9ba31a3046f042570bc874536667c6f16 or later.)
-- [pytsk](https://github.com/py4n6/pytsk) (needs to compile with TSK's develop branch)
-- [Construct](https://github.com/construct/construct)
+- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) 3.14.0 or later
+- [pytsk3](https://github.com/py4n6/pytsk) 20250312 or later
+- [Construct](https://github.com/construct/construct) 2.10 or later
 
 ## Installation
+
+Compile and install the TSK, or simply install the package from the Linux distribution you are using.
+
+> [!NOTE]
+> TSK also requires other libraries such as libewf, libvmdk, and so on.
+
+```bash
+wget https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.13.0/sleuthkit-4.13.0.tar.gz
+tar xvzf sleuthkit-4.13.0.tar.gz
+cd sleuthkit-4.13.0
+./configure
+make
+sudo make install
+```
+
+Install required Python packages.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pytsk3 construct
+```
+
+Clone FJTA.
 
 ```bash
 git clone https://github.com/mnrkbys/fjta.git
@@ -123,8 +147,9 @@ Contributions are welcome! If you wish to contribute, please fork the repository
 
 - FJTA is still under development, so some filesystem information may not be available for analysis. Additionally, the output format is subject to change.
 - FJTA only supports RAW disk images.
-- FJTA only supports EXT4 and XFS version 5 (inode version 3).
+- FJTA can analyze only EXT4 and XFS version 5 (inode version 3).
 - Only EXT4 journals stored with "data=ordered" are supported.
+- Fast commit on EXT4 is not supported.
 - External journals are not supported.
 
 ## Author

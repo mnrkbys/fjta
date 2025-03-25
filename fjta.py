@@ -24,7 +24,7 @@ import sys
 
 from journalparser import journalparser
 
-VERSION = "20250304"
+VERSION = "20250325"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -57,6 +57,12 @@ def parse_arguments() -> argparse.Namespace:
         default=False,
         help="Enable debug mode. (Default: False)",
     )
+    # parser.add_argument(
+    #     "--special-inodes",
+    #     action="store_true",
+    #     default=False,
+    #     help="Include special inodes in the timeline. (Default: False)",
+    # )
     parser.add_argument(
         "-v",
         "--version",

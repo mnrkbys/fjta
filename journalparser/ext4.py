@@ -309,12 +309,18 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
     def _find_first_descriptor_block(self) -> int:
         journal_sb = self.journal_superblock
+        self.dbg_print(f"Finding first descriptor block: {journal_sb.s_first}, {journal_sb.s_maxlen}")
         for block_num in range(journal_sb.s_first, journal_sb.s_maxlen):
+            self.dbg_print(f"Block number: {block_num}")
             data = self.journal_file.read_random(block_num * journal_sb.s_blocksize, journal_sb.s_blocksize)
-            block_header = journal_header_s.parse(data)
-            if block_header.h_blocktype == ext4_structs.JBD2_DESCRIPTOR_BLOCK:
-                self.dbg_print(f"First descriptor block: {block_num}")
-                return block_num
+            self.dbg_print(f"Data: {data[:0x20]}")
+            try:
+                block_header = journal_header_s.parse(data)
+                if block_header.h_blocktype == ext4_structs.JBD2_DESCRIPTOR_BLOCK:
+                    self.dbg_print(f"First descriptor block: {block_num}")
+                    return block_num
+            except ConstError:
+                self.dbg_print("Not descriptor block")
         return -1
 
     def _parse_descriptor_block_tags(self, data: bytes) -> list[Container]:
@@ -746,6 +752,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 timeline_event = TimelineEventInfo(
                     transaction_id=tid,
                     inode=current_entry.inode,
+                    # file_type=current_entry.file_type if current_entry.file_type == transaction_entry.file_type else transaction_entry.file_type,
                     file_type=current_entry.file_type,
                     name=name if name else current_entry.name,
                     action=action,

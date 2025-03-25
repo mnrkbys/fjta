@@ -244,6 +244,18 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         removed = current_set - new_set
         return added, removed
 
+    @staticmethod
+    def _contains_control_chars(s: str) -> bool:
+        return any(ord(c) <= 0x1F for c in s)
+
+    @classmethod
+    def _contains_control_chars_bytes(cls, data: bytes) -> bool:
+        try:
+            s = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return True
+        return cls._contains_control_chars(s)
+
     def timeline(self) -> None:
         msg = "Subclasses must implement timeline."
         raise NotImplementedError(msg)

@@ -500,6 +500,7 @@ XFS_ATTR_ROOT = 1 << 1  # The attribute's namespace is “trusted”.
 XFS_ATTR_SECURE = 1 << 2  # The attribute's namespace is “secure”.
 XFS_ATTR_PARENT = 1 << 3  # This attribute is a parent pointer.
 XFS_ATTR_INCOMPLETE = 1 << 7  # This attribute is being modified.
+XFS_ATTR_ALL = XFS_ATTR_LOCAL | XFS_ATTR_ROOT | XFS_ATTR_SECURE | XFS_ATTR_PARENT | XFS_ATTR_INCOMPLETE
 
 # XFS Inode Log Format 64 structure (big endian)
 xfs_inode_log_format_64_be = Struct(
@@ -553,7 +554,8 @@ XFS_ILOG_AEXT = 0x0080
 XFS_ILOG_ABROOT = 0x0100
 XFS_ILOG_DOWNER = 0x0200
 XFS_ILOG_AOWNER = 0x0400
-XFS_ILOG_TIMESTAMP = 0x0800
+XFS_ILOG_TIMESTAMP = 0x4000
+XFS_ILOG_IVERSION = 0x8000
 XFS_ILOG_NONCORE = (
     XFS_ILOG_DDATA
     | XFS_ILOG_DEXT
@@ -592,7 +594,7 @@ xfs_buf_log_format_be = Struct(
     "blf_len" / Int16ub,  # 0x06: Number of sectors affected by this buffer.
     "blf_blkno" / Int64sb,  # 0x08: Block number to write, in sectors.
     "blf_map_size" / Int32ub,  # 0x10: The size of blf_data_map, in 32-bit words.
-    "blf_data_map" / Array(lambda ctx: ctx.blf_map_size, Int32ub),  # 0x14: Dirty bitmap for the logged buffer.
+    # "blf_data_map" / Array(lambda ctx: ctx.blf_map_size, Int32ub),  # 0x14: Dirty bitmap for the logged buffer.
 )
 
 # XFS Buffer Log Format structure (little endian)
@@ -603,7 +605,7 @@ xfs_buf_log_format_le = Struct(
     "blf_len" / Int16ul,  # 0x06: Number of sectors affected by this buffer.
     "blf_blkno" / Int64sl,  # 0x08: Block number to write, in sectors.
     "blf_map_size" / Int32ul,  # 0x10: The size of blf_data_map, in 32-bit words.
-    "blf_data_map" / Array(lambda ctx: ctx.blf_map_size, Int32ul),  # 0x14: Dirty bitmap for the logged buffer.
+    # "blf_data_map" / Array(lambda ctx: ctx.blf_map_size, Int32ul),  # 0x14: Dirty bitmap for the logged buffer.
 )
 
 # Buffer Log Format Flags

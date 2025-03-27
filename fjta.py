@@ -24,7 +24,7 @@ import sys
 
 from journalparser import journalparser
 
-VERSION = "20250325"
+VERSION = "20250327"
 
 
 def parse_arguments() -> argparse.Namespace:

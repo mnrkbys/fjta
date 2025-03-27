@@ -26,6 +26,7 @@
 
 import copy
 import json
+import sys
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -431,9 +432,19 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         except StreamError:
             return inode, dir_entries, eattrs, symlink_target, device_number, parent_inode
 
+        old_idx = 0
         while len(log_ops) >= inode_log_format_64.ilf_size and idx < inode_log_format_64.ilf_size:
+            if idx == old_idx:
+                print(f"inode_log_format_64.ilf_fields contains unprocessable values: 0x{inode_log_format_64.ilf_fields:x}")
+                self.dbg_print(f"_parse_inode_update inode_log_format_64.ilf_fields: {inode_log_format_64.ilf_fields}")
+                sys.exit(1)
+            old_idx = idx
             self.dbg_print(f"_parse_inode_update idx: {idx}")
-            if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_CORE or inode_log_format_64.ilf_fields & 0x03000000:
+            if (
+                inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_CORE
+                or inode_log_format_64.ilf_fields & 0x03000000
+                or inode_log_format_64.ilf_fields & 0x21000000
+            ):
                 try:
                     self.dbg_print(f"_parse_inode_update xfs_dinode_core: {log_ops[idx].item_data}")
                     inode = self.xfs_dinode_core.parse(log_ops[idx].item_data)
@@ -481,7 +492,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 idx += 1
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_UUID:
                 idx += 1
-            if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ADATA:
+            if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ADATA or inode_log_format_64.ilf_fields & 0x1E000000:
                 try:
                     eattrs = self._parse_eattrs_shortform(log_ops[idx], inode_log_format_64.ilf_asize)
                     self.dbg_print(f"_parse_inode_update Extended attributes (short form): {eattrs}")

@@ -246,7 +246,8 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
     @staticmethod
     def _contains_control_chars(s: str) -> bool:
-        return any(ord(c) <= 0x1F for c in s)
+        # except for null (0x00)
+        return any(0x01 <= ord(c) <= 0x1F for c in s)
 
     @classmethod
     def _contains_control_chars_bytes(cls, data: bytes) -> bool:

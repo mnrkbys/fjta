@@ -115,7 +115,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
             #         break
             # return symlink_target
             try:
-                return i_block.decode("utf-8").replace("\x00", "")
+                return i_block.decode("utf-8").rstrip("\x00")
             except UnicodeDecodeError:
                 return i_block.hex()
 
@@ -522,7 +522,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                         self.transactions[transaction_id].set_inode_info(inode_num, inode, eattrs)
                                 else:
                                     try:
-                                        symlink_target = data_block.decode("utf-8").replace("\x00", "")
+                                        symlink_target = data_block.decode("utf-8").rstrip("\x00")
                                         self.dbg_print(f"Symlink target: {symlink_target}")
                                         self.transactions[transaction_id].symlink_extents[t_blocknr] = symlink_target
                                     except UnicodeDecodeError:
@@ -769,7 +769,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     dtime=dtime if dtime is not None else current_entry.dtime,
                     flags=flags if flags != -1 else current_entry.flags,
                     symlink_target=symlink_target if symlink_target else current_entry.symlink_target,
-                    extended_attributes=eattrs if eattrs else current_entry.extended_attributes,
+                    # extended_attributes=eattrs if eattrs else current_entry.extended_attributes,
+                    extended_attributes=eattrs,
                     device_number=current_entry.device_number,
                     info=info,
                 )

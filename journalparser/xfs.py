@@ -469,9 +469,12 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             parent_inode, dir_entries = self._parse_directory_entries_shortform(log_ops[idx], inode_log_format_64.ilf_dsize)
                             self.dbg_print(f"_parse_inode_update Parent inode: {parent_inode}")
                             self.dbg_print(f"_parse_inode_update Directory entries (short form): {dir_entries}")
-                        elif inode.di_magic == 0x0000 and inode.di_mode == 0x100:  # Seems a symlink. Is this condition correct?
+                        elif inode.di_mode & xfs_structs.S_IFLNK or (
+                            inode.di_magic == 0x0000 and inode.di_mode == 0x100  # Seems a symlink. Is this condition correct?
+                        ):
+                            self.dbg_print(f"_parse_inode_update Symlink target data: {log_ops[idx].item_data}")
                             if not self._contains_control_chars_bytes(log_ops[idx].item_data):
-                                symlink_target = log_ops[idx].item_data.decode("utf-8").replace("\x00", "")
+                                symlink_target = log_ops[idx].item_data.decode("utf-8").rstrip("\x00")
                                 self.dbg_print(f"_parse_inode_update Symlink target: {symlink_target}")
                     except StreamError:
                         pass
@@ -878,7 +881,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                     dtime=0,
                     flags=flags if flags != -1 else current_entry.flags,
                     symlink_target=symlink_target if symlink_target else current_entry.symlink_target,
-                    extended_attributes=eattrs if eattrs else current_entry.extended_attributes,
+                    # extended_attributes=eattrs if eattrs else current_entry.extended_attributes,
+                    extended_attributes=eattrs,
                     device_number=current_entry.device_number,
                     info=info,
                 )

@@ -12,7 +12,7 @@
 # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_da_format.h
 # https://github.com/torvalds/linux/blob/master/include/uapi/linux/stat.h
 
-from enum import IntEnum, auto
+from enum import IntEnum, IntFlag, auto
 
 from construct import (
     Array,
@@ -398,6 +398,24 @@ XFS_DIFLAG_EXTSZINHERIT = 1 << 12  # inherit inode extent size
 XFS_DIFLAG_NODEFRAG = 1 << 13  # do not reorganize/defragment
 XFS_DIFLAG_FILESTREAM = 1 << 14  # use filestream allocator
 
+class XfsDiflags(IntFlag):
+    REALTIME = 1 << 0  # file's blocks come from rt area
+    PREALLOC = 1 << 1  # file space has been preallocated
+    NEWRTBM = 1 << 2  # for rtbitmap inode, new format
+    IMMUTABLE = 1 << 3  # inode is immutable
+    APPEND = 1 << 4  # inode is append-only
+    SYNC = 1 << 5  # inode is written synchronously
+    NOATIME = 1 << 6  # do not update atime
+    NODUMP = 1 << 7  # do not dump
+    RTINHERIT = 1 << 8  # create with realtime bit set
+    PROJINHERIT = 1 << 9  # create with parents projid
+    NOSYMLINKS = 1 << 10  # disallow symlink creation
+    EXTSIZE = 1 << 11  # inode extent size allocator hint
+    EXTSZINHERIT = 1 << 12  # inherit inode extent size
+    NODEFRAG = 1 << 13  # do not reorganize/defragment
+    FILESTREAM = 1 << 14  # use filestream allocator
+
+
 XFS_DIFLAG_ANY = (
     XFS_DIFLAG_REALTIME
     | XFS_DIFLAG_PREALLOC
@@ -669,7 +687,8 @@ xfs_dir2_data_entry = Struct(
     "namelen" / Int8ub,  # 0x08: Length of the name, in bytes.
     "name" / Bytes(lambda ctx: ctx.namelen),  # 0x09: The name associated with this entry.
     "ftype" / Int8ub,  # 0x09 + namelen: The type of the inode.
-    "pad" / Padding(lambda ctx: 4 - (ctx.namelen % 4)),  # Padding to align to 4 bytes. Not stated in the specification.
+    "pad" / Padding(lambda ctx: (4 - ctx.namelen % 4)),  # Padding to align to 4 bytes. Not stated in the specification.
+    # "pad" / Padding(lambda ctx: (4 - (ctx.namelen % 4)) % 4),  # Padding to align to 4 bytes. Not stated in the specification.
     "tag" / Int16ub,  # 0x0A + namelen: Starting offset of the entry, in bytes.
 )
 

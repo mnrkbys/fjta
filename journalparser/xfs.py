@@ -190,27 +190,32 @@ class JournalTransactionXfs(JournalTransaction):
         entry = self.entries[inode_num]
         if entry.inode == 0:
             entry.inode = inode_num
-        if not entry.name or dir_entry.name.decode("utf-8") not in entry.name:
-            entry.name.append(dir_entry.name.decode("utf-8"))
 
-        if entry.file_type == FileTypes.UNKNOWN:
-            match dir_entry.ftype:
-                case xfs_structs.XFS_DIR3_FT_UNKNOWN:
-                    entry.file_type = FileTypes.UNKNOWN
-                case xfs_structs.XFS_DIR3_FT_REG_FILE:
-                    entry.file_type = FileTypes.REGULAR_FILE
-                case xfs_structs.XFS_DIR3_FT_DIR:
-                    entry.file_type = FileTypes.DIRECTORY
-                case xfs_structs.XFS_DIR3_FT_CHRDEV:
-                    entry.file_type = FileTypes.CHARACTER_DEVICE
-                case xfs_structs.XFS_DIR3_FT_BLKDEV:
-                    entry.file_type = FileTypes.BLOCK_DEVICE
-                case xfs_structs.XFS_DIR3_FT_FIFO:
-                    entry.file_type = FileTypes.FIFO
-                case xfs_structs.XFS_DIR3_FT_SOCK:
-                    entry.file_type = FileTypes.SOCKET
-                case xfs_structs.XFS_DIR3_FT_SYMLINK:
-                    entry.file_type = FileTypes.SYMBOLIC_LINK
+        try:
+            if not entry.name or dir_entry.name.decode("utf-8") not in entry.name:
+                entry.name.append(dir_entry.name.decode("utf-8"))
+        except UnicodeDecodeError:
+            # print(f"UnicodeDecodeError: {dir_entry}")
+            pass
+
+        # if entry.file_type == FileTypes.UNKNOWN:
+        match dir_entry.ftype:
+            case xfs_structs.XFS_DIR3_FT_UNKNOWN:
+                entry.file_type = FileTypes.UNKNOWN
+            case xfs_structs.XFS_DIR3_FT_REG_FILE:
+                entry.file_type = FileTypes.REGULAR_FILE
+            case xfs_structs.XFS_DIR3_FT_DIR:
+                entry.file_type = FileTypes.DIRECTORY
+            case xfs_structs.XFS_DIR3_FT_CHRDEV:
+                entry.file_type = FileTypes.CHARACTER_DEVICE
+            case xfs_structs.XFS_DIR3_FT_BLKDEV:
+                entry.file_type = FileTypes.BLOCK_DEVICE
+            case xfs_structs.XFS_DIR3_FT_FIFO:
+                entry.file_type = FileTypes.FIFO
+            case xfs_structs.XFS_DIR3_FT_SOCK:
+                entry.file_type = FileTypes.SOCKET
+            case xfs_structs.XFS_DIR3_FT_SYMLINK:
+                entry.file_type = FileTypes.SYMBOLIC_LINK
 
         entry.entryinfo_source |= EntryInfoSource.DIR_ENTRY
 
@@ -365,7 +370,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                     dir2_sf_entry.namelen == 0
                     or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
                     or dir2_sf_entry.ftype > xfs_structs.XFS_DIR3_FT_SYMLINK
-                    or self._contains_control_chars_bytes(dir2_sf_entry.name)
+                    # or self._contains_control_chars_bytes(dir2_sf_entry.name)
                 ):
                     # namelen = self._brute_force_namelen(data, idx, dsize)
                     # if namelen == -1:
@@ -518,20 +523,24 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             while idx < len(data) and len(data) - idx >= 0x8 + 0x1 + 0x1 + 0x1 + 0x3 + 0x2:
                 self.dbg_print(f"_parse_block_directoreis data[{idx}:]: {data[idx:]}")
                 dir2_data_entry = xfs_dir2_data_entry.parse(data[idx:])
+                self.dbg_print(f"_parse_block_directoreis dir2_data_entry: {dir2_data_entry}")
                 if (dir2_data_entry.inumber >> 48) == 0xFFFF:  # Deleted directory entry's inode number starts with 0xFFFF
                     # break
                     dir2_data_unused = xfs_dir2_data_unused.parse(data[idx:])
                     self.dbg_print(f"dir2_data_unused: {dir2_data_unused}")
                     idx += dir2_data_unused.length
+                    # idx += 0x8 + 0x1 + dir2_data_entry.namelen + 0x1 + (4 - (dir2_data_entry.namelen % 4)) + 0x2
+                    # idx += 0x8 + 0x1 + dir2_data_entry.namelen + 0x1 + ((4 - (dir2_data_entry.namelen % 4)) % 4) + 0x2
                     continue
                 elif (
                     dir2_data_entry.namelen == 0
                     or dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
                     or dir2_data_entry.ftype >= xfs_structs.XFS_DIR3_FT_WHT
-                    or self._contains_control_chars_bytes(dir2_data_entry.name)
+                    # or self._contains_control_chars_bytes(dir2_data_entry.name)
                 ):
                     break
                 idx += 0x8 + 0x1 + dir2_data_entry.namelen + 0x1 + (4 - (dir2_data_entry.namelen % 4)) + 0x2
+                # idx += 0x8 + 0x1 + dir2_data_entry.namelen + 0x1 + ((4 - (dir2_data_entry.namelen % 4)) % 4) + 0x2
                 yield dir2_data_entry
         except StreamError:
             pass
@@ -659,7 +668,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                                                 parent_inode = 0
                                                 self.dbg_print("Directory entry:")
                                                 for dir_inode, dir_entry in self._parse_buffer_writes(log_ops[idx : idx + op_size]):
-                                                    self.dbg_print(dir_entry)
+                                                    # self.dbg_print(dir_entry)
                                                     # if dir_entry.name == b".":
                                                     #     dir_inode = dir_entry.inumber
                                                     #     continue
@@ -836,13 +845,15 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                     #     dtime = new_dtime
                     case "flags":
                         action |= Actions.CHANGE_FLAGS
-                        if current_value & xfs_structs.XFS_DIFLAG_IMMUTABLE:
-                            info = self._append_msg(info, "Flags: Mutable")
-                        elif new_value & xfs_structs.XFS_DIFLAG_IMMUTABLE:
-                            info = self._append_msg(info, "Flags: Immutable")
-                        else:
-                            info = self._append_msg(info, f"Flags: 0x{current_value:08x} -> 0x{new_value:08x}")
+                        info = self._append_msg(info, f"Flags: 0x{current_value:x} -> 0x{new_value:x}")
+                        if new_value & xfs_structs.XFS_DIFLAG_IMMUTABLE:
+                            info = self._append_msg(info, "Immutable", " ")
+                        elif new_value & xfs_structs.XFS_DIFLAG_NOATIME:
+                            info = self._append_msg(info, "NoAtime", " ")
+                        elif new_value & xfs_structs.XFS_DIFLAG_PREALLOC:
+                            info = self._append_msg(info, "Preallocated", " ")
                         flags = new_value
+                        # flags = XfsDiflags(new_value) if new_value > 0 else new_value
                     case "symlink_target":
                         action |= Actions.CHANGE_SYMLINK_TARGET
                         info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")
@@ -985,6 +996,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 # In such cases, transaction.entries[inode_num].name is updated with working_entries[inode_num].name.
                 if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.INODE:
                     transaction.entries[inode_num].name = copy.deepcopy(working_entries[inode_num].name)
+                    transaction.entries[inode_num].dir_inode = working_entries[inode_num].dir_inode
+                    transaction.entries[inode_num].parent_inode = working_entries[inode_num].parent_inode
                     transaction.entries[inode_num].entryinfo_source |= EntryInfoSource.WORKING_ENTRY
                 # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
                 # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.

@@ -44,6 +44,7 @@ class Actions(Flag):
     CHANGE_SYMLINK_TARGET = auto()
     CHANGE_EA = auto()
 
+
 class EntryInfoSource(Flag):
     UNKNOWN = 0
     INODE = auto()
@@ -165,7 +166,7 @@ class TimelineEventInfo:
         result = {}
         for tl_field in self.__dataclass_fields__:
             value = getattr(self, tl_field)
-            if isinstance(value, FileTypes | Actions):
+            if isinstance(value, Flag | FileTypes | Actions):
                 result[tl_field] = value.name
             elif isinstance(value, list) and all(isinstance(item, ExtendedAttribute) for item in value):
                 result[tl_field] = [item.to_dict() for item in value]
@@ -212,10 +213,11 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         for entry_field in current_entry.__dataclass_fields__:
             current_value = getattr(current_entry, entry_field)
             new_value = getattr(new_entry, entry_field)
-            if entry_field == "name" and (current_value == [] or new_value == []):
-                continue
-            if entry_field in ("file_type", "dir_inode", "parent_inode") and (current_value == 0 or new_value == 0):
-                continue
+            # if entry_field == "name" and (current_value == [] or new_value == []):
+            #     continue
+            # if entry_field in ("file_type", "dir_inode", "parent_inode") and (current_value == 0 or new_value == 0):
+            # if entry_field in ("dir_inode", "parent_inode") and (current_value == 0 or new_value == 0):
+            #     continue
             if current_value != new_value:
                 differences.append((entry_field, current_value, new_value))
         return differences
@@ -228,9 +230,9 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         return ()
 
     @staticmethod
-    def _append_msg(orig_msg: str, msg: str) -> str:
+    def _append_msg(orig_msg: str, msg: str, delimiter: str = "|") -> str:
         if orig_msg:
-            return f"{orig_msg}|{msg}"
+            return f"{orig_msg}{delimiter}{msg}"
         return msg
 
     @staticmethod

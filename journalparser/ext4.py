@@ -203,24 +203,24 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         if not entry.name or dir_entry.name.decode("utf-8") not in entry.name:
             entry.name.append(dir_entry.name.decode("utf-8"))
 
-        if entry.file_type == FileTypes.UNKNOWN:
-            match dir_entry.file_type:
-                # case ext4_structs.EXT4_FT_UNKNOWN:
-                #     entry.file_type = FileTypes.UNKNOWN
-                case ext4_structs.EXT4_FT_REG_FILE:
-                    entry.file_type = FileTypes.REGULAR_FILE
-                case ext4_structs.EXT4_FT_DIR:
-                    entry.file_type = FileTypes.DIRECTORY
-                case ext4_structs.EXT4_FT_CHRDEV:
-                    entry.file_type = FileTypes.CHARACTER_DEVICE
-                case ext4_structs.EXT4_FT_BLKDEV:
-                    entry.file_type = FileTypes.BLOCK_DEVICE
-                case ext4_structs.EXT4_FT_FIFO:
-                    entry.file_type = FileTypes.FIFO
-                case ext4_structs.EXT4_FT_SOCK:
-                    entry.file_type = FileTypes.SOCKET
-                case ext4_structs.EXT4_FT_SYMLINK:
-                    entry.file_type = FileTypes.SYMBOLIC_LINK
+        # if entry.file_type == FileTypes.UNKNOWN:
+        match dir_entry.file_type:
+            case ext4_structs.EXT4_FT_UNKNOWN:
+                entry.file_type = FileTypes.UNKNOWN
+            case ext4_structs.EXT4_FT_REG_FILE:
+                entry.file_type = FileTypes.REGULAR_FILE
+            case ext4_structs.EXT4_FT_DIR:
+                entry.file_type = FileTypes.DIRECTORY
+            case ext4_structs.EXT4_FT_CHRDEV:
+                entry.file_type = FileTypes.CHARACTER_DEVICE
+            case ext4_structs.EXT4_FT_BLKDEV:
+                entry.file_type = FileTypes.BLOCK_DEVICE
+            case ext4_structs.EXT4_FT_FIFO:
+                entry.file_type = FileTypes.FIFO
+            case ext4_structs.EXT4_FT_SOCK:
+                entry.file_type = FileTypes.SOCKET
+            case ext4_structs.EXT4_FT_SYMLINK:
+                entry.file_type = FileTypes.SYMBOLIC_LINK
 
         entry.entryinfo_source |= EntryInfoSource.DIR_ENTRY
 
@@ -384,10 +384,11 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         while idx < len(data):
             ea_name = ""
             ea_entry = ext4_xattr_entry.parse(data[idx:])
-            if ea_entry.e_name_len % 4 != 0:
-                entry_size = 0x10 + ea_entry.e_name_len + (4 - (ea_entry.e_name_len % 4))
-            else:
-                entry_size = 0x10 + ea_entry.e_name_len + (ea_entry.e_name_len % 4)
+            # if ea_entry.e_name_len % 4 != 0:
+            #     entry_size = 0x10 + ea_entry.e_name_len + (4 - (ea_entry.e_name_len % 4))
+            # else:
+            #     entry_size = 0x10 + ea_entry.e_name_len + (ea_entry.e_name_len % 4)
+            entry_size = 0x10 + ea_entry.e_name_len + ((4 - (ea_entry.e_name_len % 4)) % 4)
             if ea_entry.e_name_len == 0 and ea_entry.e_name_index == 0 and ea_entry.e_value_offs == 0 and ea_entry.e_value_inum == 0:
                 break
             if name_space := attribute_name_indices.get(ea_entry.e_name_index):
@@ -724,13 +725,14 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         dtime = new_dtime
                     case "flags":
                         action |= Actions.CHANGE_FLAGS
-                        if current_value & ext4_structs.EXT4_IMMUTABLE_FL:
-                            info = self._append_msg(info, "Flags: Mutable")
-                        elif new_value & ext4_structs.EXT4_IMMUTABLE_FL:
-                            info = self._append_msg(info, "Flags: Immutable")
-                        else:
-                            info = self._append_msg(info, f"Flags: 0x{current_value:08x} -> 0x{new_value:08x}")
+                        info = self._append_msg(info, f"Flags: 0x{current_value:x} -> 0x{new_value:x}")
+                        if new_value & ext4_structs.EXT4_IMMUTABLE_FL:
+                            info = self._append_msg(info, " Immutable", " ")
+                        elif new_value & ext4_structs.EXT4_NOATIME_FL:
+                            info = self._append_msg(info, " NoAtime", " ")
+                        info = self._append_msg(info, f" 0x{current_value:x} -> 0x{new_value:x}")
                         flags = new_value
+                        # flags = Ext4Flags(new_value) if new_value > 0 else new_value
                     case "symlink_target":
                         action |= Actions.CHANGE_SYMLINK_TARGET
                         info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")
@@ -881,6 +883,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 # In such cases, transaction.entries[inode_num].name is updated with working_entries[inode_num].name.
                 if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.INODE:
                     transaction.entries[inode_num].name = copy.deepcopy(working_entries[inode_num].name)
+                    transaction.entries[inode_num].dir_inode = working_entries[inode_num].dir_inode
+                    transaction.entries[inode_num].parent_inode = working_entries[inode_num].parent_inode
                     transaction.entries[inode_num].entryinfo_source |= EntryInfoSource.WORKING_ENTRY
                 # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
                 # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.

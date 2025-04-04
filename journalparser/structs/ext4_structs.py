@@ -13,6 +13,7 @@
 # https://github.com/torvalds/linux/blob/master/fs/ext4/namei.c
 # https://github.com/torvalds/linux/blob/master/fs/ext4/ext4.h
 
+from enum import IntFlag
 
 from construct import (
     Array,
@@ -482,6 +483,36 @@ EXT4_RESERVED_FL = 0x80000000  # Reserved for ext4 library
 EXT4_FL_USER_VISIBLE = 0x705BDFFF  # User-visible flags
 EXT4_FL_USER_MODIFIABLE = 0x604BC0FF  # User-modifiable flags
 
+class Ext4Flags(IntFlag):
+    SECRM = 0x1
+    UNRM = 0x2
+    COMPR = 0x4
+    SYNC = 0x8
+    IMMUTABLE = 0x10
+    APPEND = 0x20
+    NODUMP = 0x40
+    NOATIME = 0x80
+    DIRTY = 0x100
+    COMPRBLK = 0x200
+    NOCOMPR = 0x400
+    ENCRYPT = 0x800
+    INDEX = 0x1000
+    IMAGIC = 0x2000
+    JOURNAL_DATA = 0x4000
+    NOTAIL = 0x8000
+    DIRSYNC = 0x10000
+    TOPDIR = 0x20000
+    HUGE_FILE = 0x40000
+    EXTENTS = 0x80000
+    VERITY = 0x100000
+    EA_INODE = 0x200000
+    EOFBLOCKS = 0x400000
+    SNAPFILE = 0x01000000
+    SNAPFILE_DELETED = 0x04000000
+    SNAPFILE_SHRUNK = 0x08000000
+    INLINE_DATA = 0x10000000
+    PROJINHERIT = 0x20000000
+    RESERVED = 0x80000000
 
 #
 # Extent tree
@@ -542,6 +573,7 @@ ext4_xattr_entry = Struct(
     "e_hash" / Int32ul,  # Hash value of attribute name and attribute value
     "e_name" / Bytes(lambda ctx: ctx.e_name_len),  # Attribute name
     # "padding" / Padding(lambda ctx: 4 - (ctx.e_name_len % 4)),  # Padding to align to 4 bytes
+    "padding" / Padding(lambda ctx: (4 - (ctx.e_name_len % 4)) % 4),  # Padding to align to 4 bytes
 )
 
 EXT4_XATTR_INDEX_USER = 1  # user.

@@ -79,7 +79,7 @@ def main() -> None:
 
     full_path = Path(args.image).expanduser().resolve()
     if not full_path.is_file():
-        print(f"Error: The specified image file '{full_path}' does not exist.")
+        print(f"Error: The specified image file '{full_path}' does not exist.", file=sys.stderr)
         sys.exit(1)
     parser = journalparser.JournalParser(full_path, args.offset, args.debug)
     parser.parse_journal()

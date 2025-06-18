@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # fjta.py
-# Forensic Journal Timeline Analyzer (FJTA) can parse and analyze journal log of EXT4 and XFS file systems.
+# Forensic Journal Timeline Analyzer (FJTA) can parse and analyze journal log of ext4 and XFS file systems.
 #
 # Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
@@ -19,12 +19,12 @@
 #
 
 import argparse
-import os
 import sys
+from pathlib import Path
 
 from journalparser import journalparser
 
-VERSION = "20250404"
+VERSION = "20250618"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -77,7 +77,10 @@ def main() -> None:
         print("Please specify a disk image file.")
         sys.exit(1)
 
-    full_path = os.path.abspath(os.path.expanduser(args.image))
+    full_path = Path(args.image).expanduser().resolve()
+    if not full_path.is_file():
+        print(f"Error: The specified image file '{full_path}' does not exist.", file=sys.stderr)
+        sys.exit(1)
     parser = journalparser.JournalParser(full_path, args.offset, args.debug)
     parser.parse_journal()
     parser.timeline()

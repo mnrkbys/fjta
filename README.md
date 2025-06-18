@@ -1,50 +1,48 @@
 # FJTA - Forensic Journal Timeline Analyzer
 
-FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesystem (EXT4, XFS) journals (not systemd-journald), generates timelines, and detects suspicious activities.
+FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesystem (ext4, XFS) journals (not systemd-journald logs), generates timelines, and detects suspicious activity.
 
 > [!CAUTION]
-> Since testing is only being done with simple disk images, there may be many issues when using more practical disk images.
+> Since testing is only being done with simple disk images, there may be many issues when analyzing more practical disk images.
 
 ## Features
 
-- **Journal Analysis**: Scans EXT4 and XFS journals to visualize modification history.
+- **Journal Analysis**: Scans ext4 and XFS journals to visualize modification history.
 - **Timeline Generation**: Organizes events within the journal in chronological order.
 - **Suspicious Activity Detection**: Identifies deleted files and potentially tampered operations.
 - **Cross-Platform Compatibility**: Written in Python, allowing analysis on any operating system.
 
-## Analyzable artifacts within filesystem journals
+## Supported Artifacts in Filesystem Journals
 
-| Artifacts                        |  EXT4  |  XFS  |
-|----------------------------------|:------:|:-----:|
-| inode                            | ✅     | ✅    |
-| Few files in directory entries   | ✅     | ✅    |
-| Many files in directory entries  | ✅     | ✅    |
-| Short symlink target names       | ✅     | ✅    |
-| Long symlink target names        | ✅     | ❌    |
-| Short extended attributes        | ✅     | ✅    |
-| Long extended attributes         | ✅     | ❌    |
-| Device number                    | ✅     | ✅    |
-| Year 2038 problem                | ✅     | ✅    |
+| Artifacts                              |  ext4  |  XFS  |
+|----------------------------------------|:------:|:-----:|
+| inode                                  | ✅     | ✅    |
+| Few files in directory entries         | ✅     | ✅    |
+| Many files in directory entries        | ✅     | ✅    |
+| Short symlink target names             | ✅     | ✅    |
+| Long symlink target names              | ✅     | ❌    |
+| Short extended attributes              | ✅     | ✅    |
+| Long extended attributes               | ✅     | ❌    |
+| Non-regular files (e.g. block devices) | ✅     | ✅    |
+| Year 2038 problem                      | ✅     | ✅    |
 
-## Detectable activities
+## Detectable Activities
 
-| Activities                         |  EXT4  |  XFS  |
-|------------------------------------|:------:|:-----:|
-| Creating files                     | ✅     | ✅    |
-| Deleting files                     | ❌     | ❌    |
-| Modification of crtime             | ✅     | ✅    |
-| Modification of atime              | ✅     | ✅    |
-| Modification of ctime              | ✅     | ✅    |
-| Modification of mtime              | ✅     | ✅    |
-| Timestomping (time manipulation)   | ✅     | ✅    |
-| File size change                   | ✅     | ✅    |
-| Modification of extended attributes| ✅     | ✅    |
-| Set immutable flag                 | ✅     | ✅    |
+| Activities                            |  ext4  |  XFS  |
+|---------------------------------------|:------:|:-----:|
+| Creating files                        | ✅     | ✅    |
+| Deleting files                        | ✅     | ✅    |
+| Modification of extended attributes   | ✅     | ✅    |
+| Timestomping (timestamp manipulation) | ✅     | ✅    |
+| Other inode metadata changes          | ✅     | ✅    |
+
+> [!NOTE]
+> "Other inode metadata changes" include updates to MACB times (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
 
 ## Requirements
 
 - Python 3.12 or later
-- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) 3.14.0 or later
+- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) 4.13.0 **only**
 - [pytsk3](https://github.com/py4n6/pytsk) 20250312 or later
 - [Construct](https://github.com/construct/construct) 2.10 or later
 
@@ -64,11 +62,11 @@ make
 sudo make install
 ```
 
-Install required Python packages.
+Then, install required Python packages.
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+PYTHONPATH=/usr/local/lib/python3/dist-packages/:$PYTHONPATH source .venv/bin/activate
 pip install pytsk3 construct
 ```
 
@@ -84,44 +82,49 @@ git clone https://github.com/mnrkbys/fjta.git
 python ./fjta.py -i ~/ext4.img | jq
 ```
 
-## Execution results
+## Sample Output
 
 ```bash
 {
-  "transaction_id": 2,
-  "inode": 7,
+  "transaction_id": 3,
+  "action": "CREATE_INODE|CREATE_HARDLINK",
+  "inode": 12,
   "file_type": "REGULAR_FILE",
-  "name": [
-    "Reserved group descriptors inode"
-  ],
-  "action": "CREATE",
-  "dir_inode": 0,
-  "parent_inode": 0,
-  "mode": 384,
+  "names": {
+    "2": [
+      "test.txt"
+    ]
+  },
+  "mode": 420,
   "uid": 0,
   "gid": 0,
-  "size": 4299210752,
-  "atime": 1729038659.0,
-  "ctime": 1729038659.0,
-  "mtime": 1729038659.0,
-  "crtime": 1729038659.0,
-  "dtime": 0,
-  "flags": 0,
+  "size": 0,
+  "atime": 1729038807.9101748,
+  "ctime": 1729038807.9101748,
+  "mtime": 1729038807.9101748,
+  "crtime": 1729038807.9101748,
+  "dtime": 0.0,
+  "flags": 524288,
+  "link_count": 1,
   "symlink_target": "",
   "extended_attributes": [],
-  "info": "Crtime: 2024-10-16 00:30:59.000000000 UTC"
+  "device_number": {
+    "major": 0,
+    "minor": 0
+  },
+  "info": "Crtime: 2024-10-16 00:33:27.910174879 UTC|Link Count: 1"
 }
 ...
 {
   "transaction_id": 23,
+  "action": "CREATE_INODE|ACCESS|CHANGE|MODIFY|TIMESTOMP",
   "inode": 12,
   "file_type": "REGULAR_FILE",
-  "name": [
-    "test.txt"
-  ],
-  "action": "CREATE|ACCESS|CHANGE|MODIFY|TIMESTOMP",
-  "dir_inode": 2,
-  "parent_inode": 2,
+  "names": {
+    "2": [
+      "test.txt"
+    ]
+  },
   "mode": 420,
   "uid": 0,
   "gid": 0,
@@ -130,10 +133,15 @@ python ./fjta.py -i ~/ext4.img | jq
   "ctime": 978312225.8287878,
   "mtime": 978312225.8287878,
   "crtime": 978312225.8287878,
-  "dtime": 0,
+  "dtime": 0.0,
   "flags": 524288,
+  "link_count": 1,
   "symlink_target": "",
   "extended_attributes": [],
+  "device_number": {
+    "major": 0,
+    "minor": 0
+  },
   "info": "Atime: 2024-10-18 08:25:51.385837319 UTC -> 2001-01-01 01:23:45.828787850 UTC (Timestomp)|Ctime: 2024-10-18 08:25:51.385837319 UTC -> 2001-01-01 01:23:45.828787850 UTC (Timestomp)|Mtime: 2024-10-18 08:25:51.385837319 UTC -> 2001-01-01 01:23:45.828787850 UTC (Timestomp)|Crtime: 2024-10-16 00:33:27.910174879 UTC -> 2001-01-01 01:23:45.828787850 UTC (Timestomp)"
 }
 ...
@@ -145,11 +153,11 @@ Contributions are welcome! If you wish to contribute, please fork the repository
 
 ## Limitations
 
-- FJTA is still under development, so some filesystem information may not be available for analysis. Additionally, the output format is subject to change.
+- FJTA is still under development, so some filesystem data may not be available for analysis. Additionally, the output format is subject to change.
 - FJTA only supports RAW disk images.
-- FJTA can analyze only EXT4 and XFS version 5 (inode version 3).
-- Only EXT4 journals stored with "data=ordered" are supported.
-- Fast commit on EXT4 is not supported.
+- FJTA can analyze only ext4 and XFS version 5 (inode version 3).
+- Only ext4 journals stored with "data=ordered" are supported.
+- Fast commit on ext4 is not supported.
 - External journals are not supported.
 
 ## Author

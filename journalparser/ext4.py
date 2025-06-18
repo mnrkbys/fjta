@@ -639,6 +639,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         if working_entry.link_count > transaction_entry.link_count:
             action |= Actions.DELETE_HARDLINK
             info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
+            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
 
         if not (action & Actions.DELETE_INODE) and (differences := self._compare_entry_fields(working_entry, transaction_entry)):
             for field, current_value, new_value in differences:
@@ -813,7 +814,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     case "names":
                         if working_entry.link_count == transaction_entry.link_count and working_entry.names != transaction_entry.names:
                             action |= Actions.MOVE
-                            info = self._append_msg(info, f"Move file: {working_entry.names} -> {transaction_entry.names}")
+                            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
                     case _:
                         pass
 

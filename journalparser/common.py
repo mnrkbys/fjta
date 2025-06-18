@@ -5,7 +5,9 @@
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
 #
 
+import copy
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
 
 import pytsk3
@@ -25,13 +27,16 @@ class FileTypes(IntEnum):
 
 class Actions(Flag):
     UNKNOWN = 0
-    CREATE = auto()
-    DELETE = auto()
+    CREATE_INODE = auto()
+    CREATE_HARDLINK = auto()
+    DELETE_INODE = auto()
+    DELETE_HARDLINK = auto()
     RENAME = auto()
     MOVE = auto()
     ACCESS = auto()
     CHANGE = auto()
     MODIFY = auto()
+    TIMESTOMP = auto()
     SETUID = auto()
     SETGID = auto()
     CHANGE_UID = auto()
@@ -39,7 +44,6 @@ class Actions(Flag):
     CHANGE_MODE = auto()
     SIZE_UP = auto()
     SIZE_DOWN = auto()
-    TIMESTOMP = auto()
     CHANGE_FLAGS = auto()
     CHANGE_SYMLINK_TARGET = auto()
     CHANGE_EA = auto()
@@ -91,12 +95,33 @@ class ExtendedAttribute:
 
 
 @dataclass
+class DentInfo:
+    dir_inode: int = 0  # Inode number of the directory containing this entry
+    parent_inode: int = 0  # Actually not needed?
+    entries: dict[int, list[str]] = field(default_factory=dict)  # dict[inode_num, list[name]]
+
+    def __hash__(self) -> int:
+        # Convert entries to a tuple to ensure immutability for hashing
+        entries_tuple = tuple((inode, tuple(names)) for inode, names in self.entries.items())
+        return hash((self.dir_inode, entries_tuple))
+
+    def __str__(self) -> str:
+        return f"dir_inode: {self.dir_inode}, parent_inode: {self.parent_inode}, entries: {[{inode: names} for inode, names in self.entries.items()]}"
+
+    def to_dict(self) -> dict:
+        return {
+            "dir_inode": self.dir_inode,
+            "parent_inode": self.parent_inode,
+            "entries": self.entries,
+        }
+
+
+@dataclass
 class EntryInfo:
     inode: int = 0
     file_type: FileTypes = FileTypes.UNKNOWN
-    name: list[str] = field(default_factory=list)  # multiple names might be assigned to the same inode (hard link)
-    dir_inode: int = 0
-    parent_inode: int = 0
+    associated_dirs: list[int] = field(default_factory=list)  # list of dir_inode numbers where this inode is referenced
+    names: dict[int, list[str]] = field(default_factory=dict)  # dict[dir_inode, list[name]]
     mode: int = 0
     uid: int = 0
     gid: int = 0
@@ -109,10 +134,8 @@ class EntryInfo:
     mtime_nanoseconds: int = 0
     crtime: int = 0
     crtime_nanoseconds: int = 0
-    # dtime: int = 0  # EXT4 only?
-    # dtime_nanoseconds: int = 0  # Not needed?
     flags: int = 0
-    # link_count: int = 0  # TODO: Need this to distinguish between moving files and creating links?
+    link_count: int = 0
     symlink_target: str = ""
     extended_attributes: list[ExtendedAttribute] = field(default_factory=list)
     device_number: DeviceNumber = field(default_factory=DeviceNumber)
@@ -123,6 +146,7 @@ class EntryInfo:
 class JournalTransaction[T: EntryInfo]:
     tid: int  # transaction id
     entries: dict[int, T] = field(default_factory=dict)  # dict[inode_num, EntryInfo]
+    dents: dict[int, DentInfo] = field(default_factory=dict)  # dict[dir_inode, DentInfo]
 
     def set_inode_info(self, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
         msg = "Subclasses must implement set_inode_info."
@@ -132,16 +156,18 @@ class JournalTransaction[T: EntryInfo]:
         msg = "Subclasses must implement set_dir_entry_info."
         raise NotImplementedError(msg)
 
+    def set_dent_info(self, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container) -> None:
+        msg = "Subclasses must implement set_dent_info."
+        raise NotImplementedError(msg)
+
 
 @dataclass
 class TimelineEventInfo:
     transaction_id: int = 0
+    action: Actions = Actions.UNKNOWN
     inode: int = 0
     file_type: FileTypes = FileTypes.UNKNOWN
-    name: list[str] = field(default_factory=list)
-    action: Actions = Actions.UNKNOWN
-    dir_inode: int = 0
-    parent_inode: int = 0
+    names: dict[int, list[str]] = field(default_factory=dict)  # dict[dir_inode, list[name]]
     mode: int = 0
     uid: int = 0
     gid: int = 0
@@ -150,17 +176,18 @@ class TimelineEventInfo:
     ctime: float = 0
     mtime: float = 0
     crtime: float = 0
-    dtime: float = 0  # EXT4 only?
+    dtime: float = 0
     flags: int = 0
+    link_count: int = 0
     symlink_target: str = ""
     extended_attributes: list[ExtendedAttribute] = field(default_factory=list)
     device_number: DeviceNumber = field(default_factory=DeviceNumber)
     info: str = ""
 
-    def __str__(self) -> str:
-        name_str = ", ".join(self.name)
-        extended_attributes_str = ", ".join([f"{ea.name}: {ea.value}" for ea in self.extended_attributes])
-        return f"{self.transaction_id}|{self.inode}|{self.file_type}|{name_str}|{self.action}|{self.dir_inode}|{self.parent_inode}|{self.mode:04o}|{self.uid}|{self.gid}|{extended_attributes_str}|{self.info}"
+    # def __str__(self) -> str:
+    #     name_str = ", ".join(self.name)
+    #     extended_attributes_str = ", ".join([f"{ea.name}: {ea.value}" for ea in self.extended_attributes])
+    #     return f"{self.transaction_id}|{self.inode}|{self.file_type}|{name_str}|{self.action}|{self.dir_inode}|{self.parent_inode}|{self.mode:04o}|{self.uid}|{self.gid}|{extended_attributes_str}|{self.info}"
 
     def to_dict(self) -> dict:
         result = {}
@@ -170,6 +197,8 @@ class TimelineEventInfo:
                 result[tl_field] = value.name
             elif isinstance(value, list) and all(isinstance(item, ExtendedAttribute) for item in value):
                 result[tl_field] = [item.to_dict() for item in value]
+            elif isinstance(value, dict) and all(isinstance(entry, DentInfo) for entry in value.values()):
+                result[tl_field] = {dir_inode: entry.to_dict() for dir_inode, entry in value.items()}
             elif isinstance(value, DeviceNumber):
                 result[tl_field] = value.to_dict()
             else:
@@ -208,16 +237,42 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         raise NotImplementedError(msg)
 
     @staticmethod
+    def _build_names_from_entries(
+        working_entry: U,
+        transaction_entry: U,
+        transaction_dents: dict[int, DentInfo],
+    ) -> tuple[dict[int, list[str]], dict[int, list[str]]]:
+        # Build a directory entry (file name) list of inode (past transactions)
+        prev_names: dict[int, list[str]] = {}
+        prev_names = copy.deepcopy(working_entry.names)
+
+        # Build a directory entry (file name) list of inode (current transaction)
+        current_names: dict[int, list[str]] = {}
+        current_names = copy.deepcopy(working_entry.names)
+        if not (transaction_entry.entryinfo_source & EntryInfoSource.DIR_ENTRY):
+            if working_entry.link_count == transaction_entry.link_count:
+                transaction_entry.associated_dirs = copy.deepcopy(working_entry.associated_dirs)
+                transaction_entry.names = copy.deepcopy(working_entry.names)
+        else:
+            for associated_dir in transaction_entry.associated_dirs:
+                current_names.update({associated_dir: transaction_dents[associated_dir].entries[transaction_entry.inode]})
+
+        # added_assciated_dirs = set(transaction_entry.associated_dirs) - set(working_entry.associated_dirs)
+        deleted_associated_dirs = set(working_entry.associated_dirs) - set(transaction_entry.associated_dirs)
+        for associated_dir in deleted_associated_dirs:
+            current_names.pop(associated_dir, None)
+        transaction_entry.names = copy.deepcopy(current_names)
+
+        return prev_names, current_names
+
+    @staticmethod
     def _compare_entry_fields(current_entry: U, new_entry: U) -> list[tuple[str, any, any]]:
         differences: list[tuple] = []
         for entry_field in current_entry.__dataclass_fields__:
+            if entry_field in ("entryinfo_source",):
+                continue
             current_value = getattr(current_entry, entry_field)
             new_value = getattr(new_entry, entry_field)
-            # if entry_field == "name" and (current_value == [] or new_value == []):
-            #     continue
-            # if entry_field in ("file_type", "dir_inode", "parent_inode") and (current_value == 0 or new_value == 0):
-            # if entry_field in ("dir_inode", "parent_inode") and (current_value == 0 or new_value == 0):
-            #     continue
             if current_value != new_value:
                 differences.append((entry_field, current_value, new_value))
         return differences
@@ -258,6 +313,20 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         except UnicodeDecodeError:
             return True
         return cls._contains_control_chars(s)
+
+    @staticmethod
+    def format_timestamp(
+        timestamp: int,
+        nanoseconds: int,
+        new_timestamp: int = 0,
+        new_nanoseconds: int = 0,
+        label: str = "Time",
+        follow: bool = True,
+    ) -> str:
+        msg = f"{label}: {datetime.fromtimestamp(timestamp, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{nanoseconds:09d} UTC"
+        if follow:
+            msg += f" -> {datetime.fromtimestamp(new_timestamp, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{new_nanoseconds:09d} UTC"
+        return msg
 
     def timeline(self) -> None:
         msg = "Subclasses must implement timeline."

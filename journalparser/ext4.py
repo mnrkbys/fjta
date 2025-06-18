@@ -26,13 +26,13 @@ import json
 import math
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 import pytsk3
 from construct import ConstError, Container, RangeError, StreamError
 
 from journalparser.common import (
     Actions,
+    DentInfo,
     DeviceNumber,
     EntryInfo,
     EntryInfoSource,
@@ -71,7 +71,7 @@ class BgInodeTable:
 
 @dataclass
 class EntryInfoExt4(EntryInfo):
-    dtime: int = 0  # EXT4 only?
+    dtime: int = 0
     dtime_nanoseconds: int = 0  # Not needed?
     external_ea_block_num: int = 0
     symlink_block_num: int = 0
@@ -89,16 +89,6 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
             self.commit_time = commit.h_commit_sec
             self.commit_time_nanoseconds = commit.h_commit_nsec
 
-    def set_dir_inode(self, inode_num: int, dir_inode_num: int) -> None:
-        if not self.entries.get(inode_num):
-            self.entries[inode_num] = EntryInfoExt4()
-        self.entries[inode_num].dir_inode = dir_inode_num
-
-    def set_parent_inode(self, inode_num: int, parent_inode_num: int) -> None:
-        if not self.entries.get(inode_num):
-            self.entries[inode_num] = EntryInfoExt4()
-        self.entries[inode_num].parent_inode = parent_inode_num
-
     def _retrieve_symlink_target(self, i_block: bytes) -> int | str:
         try:
             extent_header = ext4_extent_header.parse(i_block[0 : ext4_extent_header.sizeof()])
@@ -107,13 +97,6 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
             extent = ext4_extent.parse(i_block[ext4_extent_header.sizeof() : ext4_extent_header.sizeof() + ext4_extent.sizeof()])
             return extent.ee_start_hi << 32 | extent.ee_start_lo
         except ConstError:
-            # symlink_target = ""
-            # for block in i_block:
-            #     if part := block.to_bytes(4, byteorder="little").decode("utf-8").replace("\x00", ""):
-            #         symlink_target += part
-            #     else:
-            #         break
-            # return symlink_target
             try:
                 return i_block.decode("utf-8").rstrip("\x00")
             except UnicodeDecodeError:
@@ -134,30 +117,36 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry.crtime, entry.crtime_nanoseconds = cls._calc_extra_time(inode.i_crtime, inode.i_crtime_extra)
 
     def set_inode_info(self, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
-        special_inodes = [
-            "Doesn't exist",
-            "List of defective blocks",
-            "Root directory",
-            "User quota",
-            "Group quota",
-            "Boot loader",
-            "Undelete directory",
-            "Reserved group descriptors inode",
-            "Journal inode",
-            "The exclude inode",
-            "Replica inode",
-            "lost+found",
-        ]
+        special_inodes = {
+            0: "Doesn't exist",
+            1: "List of defective blocks",
+            2: "Root directory",
+            3: "User quota",
+            4: "Group quota",
+            5: "Boot loader",
+            6: "Undelete directory",
+            7: "Reserved group descriptors inode",
+            8: "Journal inode",
+            9: "The exclude inode",
+            10: "Replica inode",
+            11: "lost+found",
+        }
 
         if not self.entries.get(inode_num):
             self.entries[inode_num] = EntryInfoExt4()
         entry = self.entries[inode_num]
         entry.inode = inode_num
-        if inode_num < len(special_inodes) and special_inodes[inode_num] not in entry.name:
-            entry.name.append(special_inodes[inode_num])
+        if special_inodes.get(inode_num):
+            if 2 not in entry.associated_dirs:
+                entry.associated_dirs.append(2)
+            entry.names.update({2: [special_inodes[inode_num]]})
+            if not self.dents.get(2):
+                self.dents[2] = DentInfo(dir_inode=2, parent_inode=2)
+            self.dents[2].entries[inode_num] = [special_inodes[inode_num]]
+
         match inode.i_mode & 0xF000:
-            # case ext4_structs.EXT4_FT_UNKNOWN:
-            #     entry.file_type = FileTypes.UNKNOWN
+            case ext4_structs.EXT4_FT_UNKNOWN:
+                entry.file_type = FileTypes.UNKNOWN
             case ext4_structs.S_IFREG:
                 entry.file_type = FileTypes.REGULAR_FILE
             case ext4_structs.S_IFDIR:
@@ -185,6 +174,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry.dtime = inode.i_dtime
         entry.dtime_nanoseconds = 0
         entry.flags = inode.i_flags
+        entry.link_count = inode.i_links_count
         entry.external_ea_block_num = inode.i_osd2.l_i_file_acl_high << 32 | inode.i_file_acl_lo
         entry.extended_attributes = eattrs
         if inode.i_mode & 0xF000 in (ext4_structs.S_IFCHR, ext4_structs.S_IFBLK):
@@ -194,35 +184,51 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
             entry.device_number = DeviceNumber(major, minor)
         entry.entryinfo_source |= EntryInfoSource.INODE
 
-    def set_dir_entry_info(self, inode_num: int, dir_entry: Container) -> None:
-        if not self.entries.get(inode_num):
-            self.entries[inode_num] = EntryInfoExt4()
-        entry = self.entries[inode_num]
-        if entry.inode == 0:
-            entry.inode = inode_num
-        if not entry.name or dir_entry.name.decode("utf-8") not in entry.name:
-            entry.name.append(dir_entry.name.decode("utf-8"))
+    def set_dent_info(self, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | None) -> None:
+        # Set DentInfo (directory entry information)
+        if not self.dents.get(dir_inode_num):
+            self.dents[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
+        dent = self.dents[dir_inode_num]
+        if dir_entry:
+            try:
+                name = dir_entry.name.decode("utf-8")
+                if name not in dent.entries.get(inode_num, []):
+                    if not dent.entries.get(inode_num):
+                        dent.entries[inode_num] = []
+                    dent.entries[inode_num].append(name)
+            except UnicodeDecodeError:
+                pass
 
-        # if entry.file_type == FileTypes.UNKNOWN:
-        match dir_entry.file_type:
-            case ext4_structs.EXT4_FT_UNKNOWN:
-                entry.file_type = FileTypes.UNKNOWN
-            case ext4_structs.EXT4_FT_REG_FILE:
-                entry.file_type = FileTypes.REGULAR_FILE
-            case ext4_structs.EXT4_FT_DIR:
-                entry.file_type = FileTypes.DIRECTORY
-            case ext4_structs.EXT4_FT_CHRDEV:
-                entry.file_type = FileTypes.CHARACTER_DEVICE
-            case ext4_structs.EXT4_FT_BLKDEV:
-                entry.file_type = FileTypes.BLOCK_DEVICE
-            case ext4_structs.EXT4_FT_FIFO:
-                entry.file_type = FileTypes.FIFO
-            case ext4_structs.EXT4_FT_SOCK:
-                entry.file_type = FileTypes.SOCKET
-            case ext4_structs.EXT4_FT_SYMLINK:
-                entry.file_type = FileTypes.SYMBOLIC_LINK
+        # Set EntryInfo (file entry information)
+        if dir_entry:
+            if not self.entries.get(inode_num):
+                self.entries[inode_num] = EntryInfoExt4(inode=inode_num)
+            entry = self.entries[inode_num]
 
-        entry.entryinfo_source |= EntryInfoSource.DIR_ENTRY
+            if dir_inode_num not in entry.associated_dirs:
+                entry.associated_dirs.append(dir_inode_num)
+
+            # Set file type from directory entry
+            match dir_entry.file_type:
+                case ext4_structs.EXT4_FT_UNKNOWN:
+                    entry.file_type = FileTypes.UNKNOWN
+                case ext4_structs.EXT4_FT_REG_FILE:
+                    entry.file_type = FileTypes.REGULAR_FILE
+                case ext4_structs.EXT4_FT_DIR:
+                    entry.file_type = FileTypes.DIRECTORY
+                case ext4_structs.EXT4_FT_CHRDEV:
+                    entry.file_type = FileTypes.CHARACTER_DEVICE
+                case ext4_structs.EXT4_FT_BLKDEV:
+                    entry.file_type = FileTypes.BLOCK_DEVICE
+                case ext4_structs.EXT4_FT_FIFO:
+                    entry.file_type = FileTypes.FIFO
+                case ext4_structs.EXT4_FT_SOCK:
+                    entry.file_type = FileTypes.SOCKET
+                case ext4_structs.EXT4_FT_SYMLINK:
+                    entry.file_type = FileTypes.SYMBOLIC_LINK
+
+            entry.entryinfo_source |= EntryInfoSource.DIR_ENTRY
+
 
 class JournalDescriptorNotFoundError(Exception):
     pass
@@ -503,6 +509,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         self.dbg_print("JBD2_DESCRIPTOR_BLOCK")
                         self.add_transaction(transaction_id)
                         self.dbg_print(f"Transaction ID: {transaction_id}")
+                        transaction = self.transactions[transaction_id]
                         tags = self._parse_descriptor_block_tags(data)
                         if tags:
                             for tag in tags:
@@ -553,13 +560,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                                         if dir_entry.name.decode("utf-8") == "..":
                                                             parent_inode = dir_entry.inode
                                                             continue
-                                                        # if dir_entry.file_type == ext4_structs.EXT4_FT_DIR:
-                                                        #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, parent_inode)
-                                                        # else:
-                                                        #     self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
-                                                        self.transactions[transaction_id].set_dir_inode(dir_entry.inode, dir_inode)
-                                                        self.transactions[transaction_id].set_parent_inode(dir_entry.inode, parent_inode)
-                                                        self.transactions[transaction_id].set_dir_entry_info(dir_entry.inode, dir_entry)
+                                                        transaction.set_dent_info(dir_inode, parent_inode, dir_entry.inode, dir_entry)
                                             except UnicodeDecodeError:
                                                 pass
 
@@ -587,159 +588,221 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
             block_num += 1
 
-    def _generate_timeline_event(self, tid: int, current_entry: EntryInfoExt4, transaction_entry: EntryInfoExt4) -> TimelineEventInfo | None:
+    def _generate_timeline_event(
+        self,
+        transaction: JournalTransactionExt4,
+        inode_num: int,
+        working_entry: EntryInfoExt4,
+    ) -> TimelineEventInfo | None:
+        # print("=" * 50)
+        # print(f"_generate_timeline_event2: tid={transaction.tid}")
+        # print(f"_generate_timeline_event2: inode_num={inode_num}")
+        # print(f"_generate_timeline_event2: working_entry={working_entry}")
+        # print(f"_generate_timeline_event2: transaction.entries[{inode_num}]={transaction.entries[inode_num]}")
+        # print(f"_generate_timeline_event2: transaction.dents={transaction.dents}")
+
+        tid = transaction.tid
+        transaction_entry = transaction.entries[inode_num]
+
         timeline_event = None
-        if differences := self._compare_entry_fields(current_entry, transaction_entry):
-            commit_time = self.transactions[tid].commit_time
-            commit_time_nanoseconds = self.transactions[tid].commit_time_nanoseconds
-            commit_time_f = float(f"{commit_time}.{commit_time_nanoseconds:09d}")
-            action = Actions.UNKNOWN
-            info = ""
-            name = eattrs = []
-            symlink_target = ""
-            dir_inode = parent_inode = mode = uid = gid = size = flags = -1
-            atime = ctime = mtime = crtime = dtime = None
+        action = Actions.UNKNOWN
+        msg = info = ""
+
+        atime_f = float(f"{transaction_entry.atime}.{transaction_entry.atime_nanoseconds:09d}")
+        ctime_f = float(f"{transaction_entry.ctime}.{transaction_entry.ctime_nanoseconds:09d}")
+        mtime_f = float(f"{transaction_entry.mtime}.{transaction_entry.mtime_nanoseconds:09d}")
+        crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
+        dtime_f = float(f"{transaction_entry.dtime}.{transaction_entry.dtime_nanoseconds:09d}")
+
+        commit_time = self.transactions[tid].commit_time
+        commit_time_nanoseconds = self.transactions[tid].commit_time_nanoseconds
+        commit_time_f = float(f"{commit_time}.{commit_time_nanoseconds:09d}")
+
+        self._build_names_from_entries(working_entry, transaction_entry, transaction.dents)
+
+        # Delete inode
+        # The ext4 inodes have a dtime field but ctime (and mtime) is more reliable for deletion detection.
+        if transaction_entry.dtime != 0:
+            action |= Actions.DELETE_INODE
+            msg = self.format_timestamp(
+                # transaction_entry.dtime,
+                # transaction_entry.dtime_nanoseconds,
+                transaction_entry.ctime,
+                transaction_entry.ctime_nanoseconds,
+                label="Dtime",
+                follow=False,
+            )
+            info = self._append_msg(info, msg)
+            dtime_f = ctime_f
+
+        # Delete hard link
+        if working_entry.link_count > transaction_entry.link_count:
+            action |= Actions.DELETE_HARDLINK
+            info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
+
+        if not (action & Actions.DELETE_INODE) and (differences := self._compare_entry_fields(working_entry, transaction_entry)):
             for field, current_value, new_value in differences:
                 match field:
-                    case "name":
-                        action |= Actions.RENAME
-                        info = self._append_msg(info, f"Name: {current_value} -> {new_value}")
-                        name = new_value
-                    case "dir_inode":
-                        action |= Actions.MOVE
-                        info = self._append_msg(info, f"Dir Inode: {current_value} -> {new_value}")
-                        dir_inode = new_value
-                    case "parent_inode":
-                        action |= Actions.MOVE
-                        info = self._append_msg(info, f"Parent Inode: {current_value} -> {new_value}")
-                        parent_inode = new_value
+                    case "crtime":  # Reuse inode or timestomping
+                        current_crtime = current_value
+                        current_crtime_nanoseconds = working_entry.crtime_nanoseconds
+                        new_crtime = new_value
+                        if result := self._filter_differences(differences, "crtime_nanoseconds"):
+                            _, _, new_crtime_nanoseconds = result
+                        else:
+                            new_crtime_nanoseconds = current_crtime_nanoseconds
+
+                        if transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
+                            action |= Actions.CREATE_INODE
+                            msg = self.format_timestamp(current_crtime, current_crtime_nanoseconds, label="Crtime", follow=False)
+                        else:
+                            msg = self.format_timestamp(
+                                current_crtime,
+                                current_crtime_nanoseconds,
+                                new_crtime,
+                                new_crtime_nanoseconds,
+                                "Crtime",
+                            )
+
+                        current_crtime_f = float(f"{current_crtime}.{current_crtime_nanoseconds:09d}")
+                        new_crtime_f = float(f"{new_crtime}.{new_crtime_nanoseconds:09d}")
+                        if new_crtime_f < current_crtime_f:
+                            action |= Actions.TIMESTOMP
+                            msg = self.format_timestamp(
+                                current_crtime,
+                                current_crtime_nanoseconds,
+                                new_crtime,
+                                new_crtime_nanoseconds,
+                                "Crtime",
+                            )
+                            msg += " (Timestomp)"
+                        elif commit_time_f < new_crtime_f:
+                            action |= Actions.TIMESTOMP
+                            msg = self.format_timestamp(
+                                current_crtime,
+                                current_crtime_nanoseconds,
+                                new_crtime,
+                                new_crtime_nanoseconds,
+                                "Crtime",
+                            )
+                            msg += " (Timestomp: commit_time < crtime)"
+                        info = self._append_msg(info, msg)
+                    # case "dtime":
+                    #     action |= Actions.DELETE_INODE
+                    #     new_dtime = new_value
+                    #     msg = self.format_timestamp(
+                    #         new_dtime,
+                    #         transaction_entry.dtime_nanoseconds,
+                    #         label="Dtime",
+                    #         follow=False,
+                    #     )
+                    #     info = self._append_msg(info, msg)
+                    case "atime":
+                        action |= Actions.ACCESS
+                        current_atime = current_value
+                        current_atime_nanoseconds = working_entry.atime_nanoseconds
+                        new_atime = new_value
+                        if result := self._filter_differences(differences, "atime_nanoseconds"):
+                            _, _, new_atime_nanoseconds = result
+                        else:
+                            new_atime_nanoseconds = current_atime_nanoseconds
+                        msg = self.format_timestamp(current_atime, current_atime_nanoseconds, new_atime, new_atime_nanoseconds, "Atime")
+
+                        current_atime_f = float(f"{current_atime}.{current_atime_nanoseconds:09d}")
+                        new_atime_f = float(f"{new_atime}.{new_atime_nanoseconds:09d}")
+                        if new_atime_f < current_atime_f:
+                            action |= Actions.TIMESTOMP
+                            msg += " (Timestomp)"
+                        elif commit_time_f < new_atime_f:
+                            action |= Actions.TIMESTOMP
+                            msg += " (Timestomp: commit_time < atime)"
+                        info = self._append_msg(info, msg)
+                    case "ctime":
+                        action |= Actions.CHANGE
+                        current_ctime = current_value
+                        current_ctime_nanoseconds = working_entry.ctime_nanoseconds
+                        new_ctime = new_value
+                        if result := self._filter_differences(differences, "ctime_nanoseconds"):
+                            _, _, new_ctime_nanoseconds = result
+                        else:
+                            new_ctime_nanoseconds = current_ctime_nanoseconds
+                        msg = self.format_timestamp(current_ctime, current_ctime_nanoseconds, new_ctime, new_ctime_nanoseconds, "Ctime")
+
+                        current_ctime_f = float(f"{current_ctime}.{current_ctime_nanoseconds:09d}")
+                        new_ctime_f = float(f"{new_ctime}.{new_ctime_nanoseconds:09d}")
+                        if new_ctime_f < current_ctime_f:
+                            action |= Actions.TIMESTOMP
+                            msg += " (Timestomp)"
+                        elif commit_time_f < new_ctime_f:
+                            action |= Actions.TIMESTOMP
+                            msg += " (Timestomp: commit_time < ctime)"
+                        info = self._append_msg(info, msg)
+                    case "mtime":
+                        action |= Actions.MODIFY
+                        current_mtime = current_value
+                        current_mtime_nanoseconds = working_entry.mtime_nanoseconds
+                        new_mtime = new_value
+                        if result := self._filter_differences(differences, "mtime_nanoseconds"):
+                            _, _, new_mtime_nanoseconds = result
+                        else:
+                            new_mtime_nanoseconds = current_mtime_nanoseconds
+                        msg = self.format_timestamp(current_mtime, current_mtime_nanoseconds, new_mtime, new_mtime_nanoseconds, "Mtime")
+
+                        current_mtime_f = float(f"{current_mtime}.{current_mtime_nanoseconds:09d}")
+                        new_mtime_f = float(f"{new_mtime}.{new_mtime_nanoseconds:09d}")
+                        if new_mtime_f < current_mtime_f:
+                            action |= Actions.TIMESTOMP
+                            msg += " (Timestomp)"
+                        elif commit_time_f < new_mtime_f:
+                            action |= Actions.TIMESTOMP
+                            msg += " (Timestomp: commit_time < mtime)"
+                        info = self._append_msg(info, msg)
                     case "mode":
                         action |= Actions.CHANGE_MODE
                         info = self._append_msg(info, f"Mode: {current_value:04o} -> {new_value:04o}")
-                        mode = new_value
                     case "uid":
                         action |= Actions.CHANGE_UID
                         info = self._append_msg(info, f"UID: {current_value} -> {new_value}")
                         if new_value & ext4_structs.S_ISUID:
                             action |= Actions.SETUID
                             info += " (SetUID)"
-                        uid = new_value
                     case "gid":
                         action |= Actions.CHANGE_GID
                         info = self._append_msg(info, f"GID: {current_value} -> {new_value}")
                         if new_value & ext4_structs.S_ISGID:
                             action |= Actions.SETGID
                             info += " (SetGID)"
-                        gid = new_value
                     case "size":
                         if current_value < new_value:
                             action |= Actions.SIZE_UP
                         else:
                             action |= Actions.SIZE_DOWN
                         info = self._append_msg(info, f"Size: {current_value} -> {new_value}")
-                        size = new_value
-                    case "atime":
-                        action |= Actions.ACCESS
-                        current_atime = current_value
-                        current_atime_nanoseconds = current_entry.atime_nanoseconds
-                        new_atime = new_value
-                        if result := self._filter_differences(differences, "atime_nanoseconds"):
-                            _, _, new_atime_nanoseconds = result
-                        else:
-                            new_atime_nanoseconds = current_atime_nanoseconds
-                        info = self._append_msg(
-                            info,
-                            f"Atime: {datetime.fromtimestamp(current_atime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{current_atime_nanoseconds:09d} UTC -> {datetime.fromtimestamp(new_atime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{new_atime_nanoseconds:09d} UTC",
-                        )
-
-                        current_atime_f = float(f"{current_atime}.{current_atime_nanoseconds:09d}")
-                        new_atime_f = float(f"{new_atime}.{new_atime_nanoseconds:09d}")
-                        if commit_time_f < new_atime_f or new_atime_f < current_atime_f:
-                            action |= Actions.TIMESTOMP
-                            info += " (Timestomp)"
-                        atime = new_atime_f
-                    case "ctime":
-                        action |= Actions.CHANGE
-                        current_ctime = current_value
-                        current_ctime_nanoseconds = current_entry.ctime_nanoseconds
-                        new_ctime = new_value
-                        if result := self._filter_differences(differences, "ctime_nanoseconds"):
-                            _, _, new_ctime_nanoseconds = result
-                        else:
-                            new_ctime_nanoseconds = current_ctime_nanoseconds
-                        info = self._append_msg(
-                            info,
-                            f"Ctime: {datetime.fromtimestamp(current_ctime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{current_ctime_nanoseconds:09d} UTC -> {datetime.fromtimestamp(new_ctime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{new_ctime_nanoseconds:09d} UTC",
-                        )
-
-                        current_ctime_f = float(f"{current_ctime}.{current_ctime_nanoseconds:09d}")
-                        new_ctime_f = float(f"{new_ctime}.{new_ctime_nanoseconds:09d}")
-                        if commit_time_f < new_ctime_f or new_ctime_f < current_ctime_f:
-                            action |= Actions.TIMESTOMP
-                            info += " (Timestomp)"
-                        ctime = new_ctime_f
-                    case "mtime":
-                        action |= Actions.MODIFY
-                        current_mtime = current_value
-                        current_mtime_nanoseconds = current_entry.mtime_nanoseconds
-                        new_mtime = new_value
-                        if result := self._filter_differences(differences, "mtime_nanoseconds"):
-                            _, _, new_mtime_nanoseconds = result
-                        else:
-                            new_mtime_nanoseconds = current_mtime_nanoseconds
-                        info = self._append_msg(
-                            info,
-                            f"Mtime: {datetime.fromtimestamp(current_mtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{current_mtime_nanoseconds:09d} UTC -> {datetime.fromtimestamp(new_mtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{new_mtime_nanoseconds:09d} UTC",
-                        )
-
-                        current_mtime_f = float(f"{current_mtime}.{current_mtime_nanoseconds:09d}")
-                        new_mtime_f = float(f"{new_mtime}.{new_mtime_nanoseconds:09d}")
-                        if commit_time_f < new_mtime_f or new_mtime_f < current_mtime_f:
-                            action |= Actions.TIMESTOMP
-                            info += " (Timestomp)"
-                        mtime = new_mtime_f
-                    case "crtime":
-                        action |= Actions.CREATE
-                        current_crtime = current_value
-                        current_crtime_nanoseconds = current_entry.crtime_nanoseconds
-                        new_crtime = new_value
-                        if result := self._filter_differences(differences, "crtime_nanoseconds"):
-                            _, _, new_crtime_nanoseconds = result
-                        else:
-                            new_crtime_nanoseconds = current_crtime_nanoseconds
-                        info = self._append_msg(
-                            info,
-                            f"Crtime: {datetime.fromtimestamp(current_crtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{current_crtime_nanoseconds:09d} UTC -> {datetime.fromtimestamp(new_crtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{new_crtime_nanoseconds:09d} UTC",
-                        )
-
-                        current_crtime_f = float(f"{current_crtime}.{current_crtime_nanoseconds:09d}")
-                        new_crtime_f = float(f"{new_crtime}.{new_crtime_nanoseconds:09d}")
-                        if commit_time_f < new_crtime_f or new_crtime_f < current_crtime_f:
-                            action |= Actions.TIMESTOMP
-                            info += " (Timestomp)"
-                        crtime = new_crtime_f
-                    case "dtime":
-                        action |= Actions.DELETE
-                        new_dtime = new_value
-                        info = self._append_msg(info, f"Dtime: {datetime.fromtimestamp(new_dtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC")
-                        dtime = new_dtime
+                    case "link_count":
+                        if working_entry.link_count < transaction_entry.link_count:
+                            action |= Actions.CREATE_HARDLINK
+                            info = self._append_msg(
+                                info,
+                                f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
+                            )
+                        elif working_entry.link_count > transaction_entry.link_count:
+                            action |= Actions.DELETE_HARDLINK
+                            info = self._append_msg(
+                                info,
+                                f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
+                            )
                     case "flags":
                         action |= Actions.CHANGE_FLAGS
                         info = self._append_msg(info, f"Flags: 0x{current_value:x} -> 0x{new_value:x}")
                         if new_value & ext4_structs.EXT4_IMMUTABLE_FL:
-                            info = self._append_msg(info, " Immutable", " ")
+                            info = self._append_msg(info, "Immutable", " ")
                         elif new_value & ext4_structs.EXT4_NOATIME_FL:
-                            info = self._append_msg(info, " NoAtime", " ")
-                        info = self._append_msg(info, f" 0x{current_value:x} -> 0x{new_value:x}")
-                        flags = new_value
-                        # flags = Ext4Flags(new_value) if new_value > 0 else new_value
+                            info = self._append_msg(info, "NoAtime", "")
                     case "symlink_target":
                         action |= Actions.CHANGE_SYMLINK_TARGET
                         info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")
-                        symlink_target = new_value
                     case "extended_attributes":
                         action |= Actions.CHANGE_EA
-                        eattrs = new_value
                         added_ea, removed_ea = self._compare_extended_attributes(current_value, new_value)
                         if added_ea:
                             added_ea_str = ", ".join(f"{ea}" for ea in added_ea)
@@ -747,43 +810,45 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         if removed_ea:
                             removed_ea_str = ", ".join(f"{ea}" for ea in removed_ea)
                             info = self._append_msg(info, f"Removed EA: {removed_ea_str}")
+                    case "names":
+                        if working_entry.link_count == transaction_entry.link_count and working_entry.names != transaction_entry.names:
+                            action |= Actions.MOVE
+                            info = self._append_msg(info, f"Move file: {working_entry.names} -> {transaction_entry.names}")
                     case _:
                         pass
 
-            if action != Actions.UNKNOWN:
-                timeline_event = TimelineEventInfo(
-                    transaction_id=tid,
-                    inode=current_entry.inode,
-                    # file_type=current_entry.file_type if current_entry.file_type == transaction_entry.file_type else transaction_entry.file_type,
-                    file_type=current_entry.file_type,
-                    name=name if name else current_entry.name,
-                    action=action,
-                    dir_inode=dir_inode if dir_inode != -1 else current_entry.dir_inode,
-                    parent_inode=parent_inode if parent_inode != -1 else current_entry.parent_inode,
-                    mode=mode if mode != -1 else current_entry.mode,
-                    uid=uid if uid != -1 else current_entry.uid,
-                    gid=gid if gid != -1 else current_entry.gid,
-                    size=size if size != -1 else current_entry.size,
-                    atime=atime if atime is not None else float(f"{current_entry.atime}.{current_entry.atime_nanoseconds:09d}"),
-                    ctime=ctime if ctime is not None else float(f"{current_entry.ctime}.{current_entry.ctime_nanoseconds:09d}"),
-                    mtime=mtime if mtime is not None else float(f"{current_entry.mtime}.{current_entry.mtime_nanoseconds:09d}"),
-                    crtime=crtime if crtime is not None else float(f"{current_entry.crtime}.{current_entry.crtime_nanoseconds:09d}"),
-                    dtime=dtime if dtime is not None else current_entry.dtime,
-                    flags=flags if flags != -1 else current_entry.flags,
-                    symlink_target=symlink_target if symlink_target else current_entry.symlink_target,
-                    # extended_attributes=eattrs if eattrs else current_entry.extended_attributes,
-                    extended_attributes=eattrs,
-                    device_number=current_entry.device_number,
-                    info=info,
-                )
-
-            # Apply new values to the current entry
+            # Update working_entry with transaction_entry
             for field, _, new_value in differences:
-                setattr(current_entry, field, new_value)
+                if field not in ("associated_dirs", "names"):
+                    setattr(working_entry, field, new_value)
+            working_entry.associated_dirs = copy.deepcopy(transaction_entry.associated_dirs)
+            working_entry.names = copy.deepcopy(transaction_entry.names)
 
-            return timeline_event
+        if action != Actions.UNKNOWN:
+            timeline_event = TimelineEventInfo(
+                transaction_id=tid,
+                inode=inode_num,
+                file_type=transaction_entry.file_type,
+                names=transaction_entry.names,
+                action=action,
+                mode=transaction_entry.mode,
+                uid=transaction_entry.uid,
+                gid=transaction_entry.gid,
+                size=transaction_entry.size,
+                atime=atime_f,
+                ctime=ctime_f,
+                mtime=mtime_f,
+                crtime=crtime_f,
+                dtime=dtime_f,
+                flags=transaction_entry.flags,
+                link_count=transaction_entry.link_count,
+                symlink_target=transaction_entry.symlink_target,
+                extended_attributes=transaction_entry.extended_attributes,
+                device_number=transaction_entry.device_number,
+                info=info,
+            )
 
-        return None
+        return timeline_event
 
     def timeline(self) -> None:
         working_entries: dict[int, EntryInfoExt4] = {}
@@ -792,119 +857,195 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             transaction = self.transactions[tid]
             commit_time_f = float(f"{transaction.commit_time}.{transaction.commit_time_nanoseconds:09d}")
             for inode_num in transaction.entries:
+                if inode_num <= 11 and inode_num != 2:
+                    continue  # Skip special inodes
+                transaction_entry = transaction.entries[inode_num]
                 # Generate working_entriy and first timeline event for each inode
                 if not working_entries.get(inode_num):
                     msg = info = ""
                     action = Actions.UNKNOWN
                     working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
-                    atime_f = float(f"{working_entries[inode_num].atime}.{working_entries[inode_num].atime_nanoseconds:09d}")
-                    ctime_f = float(f"{working_entries[inode_num].ctime}.{working_entries[inode_num].ctime_nanoseconds:09d}")
-                    mtime_f = float(f"{working_entries[inode_num].mtime}.{working_entries[inode_num].mtime_nanoseconds:09d}")
-                    crtime_f = float(f"{working_entries[inode_num].crtime}.{working_entries[inode_num].crtime_nanoseconds:09d}")
+                    atime_f = float(f"{transaction_entry.atime}.{transaction_entry.atime_nanoseconds:09d}")
+                    ctime_f = float(f"{transaction_entry.ctime}.{transaction_entry.ctime_nanoseconds:09d}")
+                    mtime_f = float(f"{transaction_entry.mtime}.{transaction_entry.mtime_nanoseconds:09d}")
+                    crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
+                    dtime_f = float(f"{transaction_entry.dtime}.{transaction_entry.dtime_nanoseconds:09d}")
 
+                    self._build_names_from_entries(working_entries[inode_num], transaction_entry, transaction.dents)
+
+                    # Create inode
                     # - Creation of files in a directory updates the directory's ctime and mtime,
                     #   so a directory created almost simultaneously with a large number of files may not be detected.
                     #   Under the following conditions, differences of less than 1 second are ignored.
                     # - In some cases, such as creating symlinks, only atime is updated. So, it is removed from the condition.
-                    if (
-                        working_entries[inode_num].crtime != 0
-                        and working_entries[inode_num].ctime == working_entries[inode_num].mtime == working_entries[inode_num].crtime
-                    ):
-                        action |= Actions.CREATE
+                    if transaction_entry.crtime != 0 and transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
+                        action |= Actions.CREATE_INODE
+                        msg = self.format_timestamp(
+                            transaction_entry.crtime,
+                            transaction_entry.crtime_nanoseconds,
+                            label="Crtime",
+                            follow=False,
+                        )
                         info = self._append_msg(
                             info,
-                            f"Crtime: {datetime.fromtimestamp(working_entries[inode_num].crtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{working_entries[inode_num].crtime_nanoseconds:09d} UTC",
+                            msg,
                         )
-                        if crtime_f > commit_time_f:
-                            action |= Actions.TIMESTOMP
-                            info += " (Timestomp)"
 
-                    if atime_f < crtime_f or atime_f > commit_time_f:
+                    # Create hard link
+                    if action & Actions.CREATE_INODE:
+                        action |= Actions.CREATE_HARDLINK
+                        if transaction_entry.link_count > 0:
+                            info = self._append_msg(
+                                info,
+                                f"Link Count: {transaction_entry.link_count}",
+                            )
+
+                    # Delete inode
+                    # The deletion time of XFS inodes is the same as ctime.
+                    if transaction_entry.dtime != 0:
+                        action |= Actions.DELETE_INODE
+                        msg = self.format_timestamp(
+                            transaction_entry.dtime,
+                            transaction_entry.dtime_nanoseconds,
+                            label="Dtime",
+                            follow=False,
+                        )
+                        info = self._append_msg(
+                            info,
+                            msg,
+                        )
+
+                    # Timestomp atime
+                    if atime_f < crtime_f:
                         action |= Actions.ACCESS | Actions.TIMESTOMP
-                        msg = f"Atime: {datetime.fromtimestamp(working_entries[inode_num].atime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{working_entries[inode_num].atime_nanoseconds:09d} UTC (Timestomp)"
-                        info = self._append_msg(info, msg)
-
-                    if ctime_f < crtime_f or ctime_f > commit_time_f:
-                        action |= Actions.CHANGE | Actions.TIMESTOMP
-                        msg = f"Ctime: {datetime.fromtimestamp(working_entries[inode_num].ctime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{working_entries[inode_num].ctime_nanoseconds:09d} UTC (Timestomp)"
-                        info = self._append_msg(info, msg)
-
-                    if mtime_f < crtime_f or mtime_f > commit_time_f:
-                        action |= Actions.MODIFY | Actions.TIMESTOMP
-                        msg = f"Mtime: {datetime.fromtimestamp(working_entries[inode_num].mtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{working_entries[inode_num].mtime_nanoseconds:09d} UTC (Timestomp)"
-                        info = self._append_msg(info, msg)
-
-                    if working_entries[inode_num].dtime != 0:
-                        action |= Actions.DELETE
-                        info = self._append_msg(
-                            info,
-                            f"Dtime: {datetime.fromtimestamp(working_entries[inode_num].dtime, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                        msg = self.format_timestamp(
+                            transaction_entry.atime,
+                            transaction_entry.atime_nanoseconds,
+                            label="Atime",
+                            follow=False,
                         )
-                        if working_entries[inode_num].dtime < crtime_f or working_entries[inode_num].dtime > commit_time_f:
-                            action |= Actions.TIMESTOMP
-                            info += " (Timestomp)"
+                        msg += " (Timestomp: atime < crtime)"
+                        info = self._append_msg(info, msg)
+                    elif commit_time_f < atime_f:
+                        action |= Actions.ACCESS | Actions.TIMESTOMP
+                        msg = self.format_timestamp(
+                            transaction_entry.atime,
+                            transaction_entry.atime_nanoseconds,
+                            label="Atime",
+                            follow=False,
+                        )
+                        msg += " (Timestomp: commit_time < atime)"
+                        info = self._append_msg(info, msg)
 
-                    if working_entries[inode_num].flags & ext4_structs.EXT4_IMMUTABLE_FL:
+                    # Timestomp ctime
+                    if ctime_f < crtime_f:
+                        action |= Actions.CHANGE | Actions.TIMESTOMP
+                        msg = self.format_timestamp(
+                            transaction_entry.ctime,
+                            transaction_entry.ctime_nanoseconds,
+                            label="Ctime",
+                            follow=False,
+                        )
+                        msg += " (Timestomp: ctime < crtime)"
+                        info = self._append_msg(info, msg)
+                    elif commit_time_f < ctime_f:
+                        action |= Actions.CHANGE | Actions.TIMESTOMP
+                        msg = self.format_timestamp(
+                            transaction_entry.ctime,
+                            transaction_entry.ctime_nanoseconds,
+                            label="Ctime",
+                            follow=False,
+                        )
+                        msg += " (Timestomp: commit_time < ctime)"
+                        info = self._append_msg(info, msg)
+
+                    # Timestomp mtime
+                    if mtime_f < crtime_f:
+                        action |= Actions.MODIFY | Actions.TIMESTOMP
+                        msg = self.format_timestamp(
+                            transaction_entry.mtime,
+                            transaction_entry.mtime_nanoseconds,
+                            label="Mtime",
+                            follow=False,
+                        )
+                        msg += " (Timestomp: mtime < crtime)"
+                        info = self._append_msg(info, msg)
+                    elif commit_time_f < mtime_f:
+                        action |= Actions.MODIFY | Actions.TIMESTOMP
+                        msg = self.format_timestamp(
+                            transaction_entry.mtime,
+                            transaction_entry.mtime_nanoseconds,
+                            label="Mtime",
+                            follow=False,
+                        )
+                        msg += " (Timestomp: commit_time < mtime)"
+                        info = self._append_msg(info, msg)
+
+                    # Set flags
+                    if transaction_entry.flags & (ext4_structs.EXT4_IMMUTABLE_FL | ext4_structs.EXT4_NOATIME_FL):
                         action |= Actions.CHANGE_FLAGS
-                        info = self._append_msg(info, "Flags: Immutable")
+                        info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
+                        if transaction_entry.flags & ext4_structs.EXT4_IMMUTABLE_FL:
+                            info = self._append_msg(info, " Immutable", " ")
+                        elif transaction_entry.flags & ext4_structs.EXT4_NOATIME_FL:
+                            info = self._append_msg(info, " NoAtime", " ")
 
                     # Copy symlink target to working entry
                     if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
                         working_entries[inode_num].symlink_target = symlink_target
+                    if symlink_target := transaction.symlink_extents.get(transaction_entry.symlink_block_num):
+                        transaction_entry.symlink_target = symlink_target
+
+                    # Update working_entry with transaction_entry
+                    working_entries[inode_num].associated_dirs = copy.deepcopy(transaction_entry.associated_dirs)
+                    working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
 
                     if action != Actions.UNKNOWN:
                         timeline_events.append(
                             TimelineEventInfo(
                                 transaction_id=tid,
                                 inode=inode_num,
-                                file_type=working_entries[inode_num].file_type,
-                                name=working_entries[inode_num].name,
+                                file_type=transaction_entry.file_type,
+                                names=transaction_entry.names,
                                 action=action,
-                                dir_inode=working_entries[inode_num].dir_inode,
-                                parent_inode=working_entries[inode_num].parent_inode,
-                                mode=working_entries[inode_num].mode,
-                                uid=working_entries[inode_num].uid,
-                                gid=working_entries[inode_num].gid,
-                                size=working_entries[inode_num].size,
+                                mode=transaction_entry.mode,
+                                uid=transaction_entry.uid,
+                                gid=transaction_entry.gid,
+                                size=transaction_entry.size,
                                 atime=atime_f,
                                 ctime=ctime_f,
                                 mtime=mtime_f,
                                 crtime=crtime_f,
-                                dtime=working_entries[inode_num].dtime,
-                                flags=working_entries[inode_num].flags,
-                                symlink_target=working_entries[inode_num].symlink_target,
-                                extended_attributes=working_entries[inode_num].extended_attributes,
-                                device_number=working_entries[inode_num].device_number,
+                                dtime=dtime_f,
+                                flags=transaction_entry.flags,
+                                link_count=transaction_entry.link_count,
+                                symlink_target=transaction_entry.symlink_target,
+                                extended_attributes=transaction_entry.extended_attributes,
+                                device_number=transaction_entry.device_number,
                                 info=info,
                             ),
                         )
 
-                # Sometimes transaction.entries[inode_num] has information only from an inode and does not have information from directory entries.
-                # In such cases, transaction.entries[inode_num].name is updated with working_entries[inode_num].name.
-                if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.INODE:
-                    transaction.entries[inode_num].name = copy.deepcopy(working_entries[inode_num].name)
-                    transaction.entries[inode_num].dir_inode = working_entries[inode_num].dir_inode
-                    transaction.entries[inode_num].parent_inode = working_entries[inode_num].parent_inode
-                    transaction.entries[inode_num].entryinfo_source |= EntryInfoSource.WORKING_ENTRY
                 # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
                 # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
-                elif transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
-                    orig_name_field = transaction.entries[inode_num].name
+                if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
                     transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
-                    transaction.entries[inode_num].name = orig_name_field
                     transaction.entries[inode_num].entryinfo_source |= EntryInfoSource.WORKING_ENTRY
+
                 # Copy symlink target to current entry
                 if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
                     if not transaction.entries.get(inode_num):
                         transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
                     transaction.entries[inode_num].symlink_target = symlink_target
+
                 # Copy external extended attributes to current entry
                 if eattrs := transaction.external_ea_blocks.get(working_entries[inode_num].external_ea_block_num):
                     if not transaction.entries.get(inode_num):
                         transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
                     transaction.entries[inode_num].extended_attributes.extend(eattrs)
+
                 # Generate timeline event for each inode
-                if timeline_event := self._generate_timeline_event(tid, working_entries[inode_num], transaction.entries[inode_num]):
+                if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
                     timeline_events.append(timeline_event)
 
         for event in timeline_events:

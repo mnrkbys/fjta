@@ -27,6 +27,7 @@
 import copy
 import json
 import sys
+from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -82,7 +83,7 @@ class XfsLogOperation:
     item_data: bytes
 
 
-# TODO: Remove this class
+# Not needed for now
 class TransState(IntEnum):
     UNKNOWN = auto()
     START_TRANS = auto()
@@ -229,8 +230,8 @@ class LogRecordNotFoundError(Exception):
 
 
 class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, offset: int, debug: bool = False) -> None:
-        super().__init__(img_info, fs_info, offset, debug)
+    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, args: Namespace) -> None:
+        super().__init__(img_info, fs_info, args)
 
     def _convert_block_to_absaddr(self, block_num: int, log2val: int) -> int:
         if self.sb_agblocks:
@@ -668,7 +669,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                                                         continue
                                                     transaction.set_dent_info(dir_inode, parent_inode, dir_entry.inumber, dir_entry)
                                             case xfs_structs.XFS_LI_ICREATE:  # 0x123F
-                                                # TODO: Implement parsing inode creation, but I have never seen this log item in the journal.
+                                                # TODO: Implement parsing inode creation, but I have never seen this log item in journals.
                                                 transaction.trans_state = TransState.INODE_CREATION
                                             case 0x4946:  # "IF" of "FIB3"
                                                 if log_item.size == 0x3342:  # "3B" of "FIB3"
@@ -947,8 +948,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         for tid in sorted(self.transactions):
             transaction = self.transactions[tid]
             for inode_num in transaction.entries:
-                # if inode_num <= 128:
-                #     continue  # Skip special inodes
+                # Skip special inodes except the root inode
+                # root inode is 128, and it is not a special inode.
+                if not self.special_inodes and inode_num < 128:
+                    continue
                 transaction_entry = transaction.entries[inode_num]
                 # Generate working_entriy and first timeline event for each inode
                 if not working_entries.get(inode_num):
@@ -976,19 +979,13 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             label="Crtime",
                             follow=False,
                         )
-                        info = self._append_msg(
-                            info,
-                            msg,
-                        )
+                        info = self._append_msg(info, msg)
 
                     # Create hard link
                     if action & Actions.CREATE_INODE:
                         action |= Actions.CREATE_HARDLINK
                         if transaction_entry.link_count > 0:
-                            info = self._append_msg(
-                                info,
-                                f"Link Count: {transaction_entry.link_count}",
-                            )
+                            info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
 
                     # Delete inode
                     # The deletion time of XFS inodes is the same as ctime.
@@ -1005,10 +1002,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             label="Dtime",
                             follow=False,
                         )
-                        info = self._append_msg(
-                            info,
-                            msg,
-                        )
+                        info = self._append_msg(info, msg)
                         dtime_f = ctime_f
 
                     # # Delete hard link

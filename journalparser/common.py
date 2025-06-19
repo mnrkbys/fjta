@@ -6,6 +6,7 @@
 #
 
 import copy
+from argparse import Namespace
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
@@ -207,11 +208,12 @@ class TimelineEventInfo:
 
 
 class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, offset: int = 0, debug: bool = False) -> None:
+    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, args: Namespace) -> None:
         self.img_info = img_info
         self.fs_info = fs_info
-        self.offset = offset
-        self.debug = debug
+        self.offset = args.offset
+        self.debug = args.debug
+        self.special_inodes = args.special_inodes
         self.block_size = self.fs_info.info.block_size
         self.endian = self.fs_info.info.endian  # 1 = pytsk3.TSK_LIT_ENDIAN, 2 = pytsk3.TSK_BIG_ENDIAN
         self.journal_file = None

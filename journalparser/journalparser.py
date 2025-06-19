@@ -5,6 +5,7 @@
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
 #
 
+from argparse import Namespace
 from pathlib import Path
 
 import pytsk3
@@ -13,14 +14,15 @@ from journalparser import ext4, xfs
 
 
 class JournalParser:
-    def __init__(self, img_file: str | Path, offset: int = 0, debug: bool = False) -> None:
+    # def __init__(self, img_file: str | Path, offset: int = 0, debug: bool = False) -> None:
+    def __init__(self, img_file: str | Path, args: Namespace) -> None:
         self.img_info = pytsk3.Img_Info(str(img_file))
-        self.fs_info = pytsk3.FS_Info(self.img_info, offset)
+        self.fs_info = pytsk3.FS_Info(self.img_info, args.offset)
         if self.fs_info.info.ftype == pytsk3.TSK_FS_TYPE_EXT4:
-            self.journal_parser = ext4.JournalParserExt4(self.img_info, self.fs_info, offset, debug)
+            self.journal_parser = ext4.JournalParserExt4(self.img_info, self.fs_info, args)
         # elif self.fs_info.info.ftype == 0x80000:  # pytsk3.TSK_FS_TYPE_XFS:
         elif self.fs_info.info.ftype == pytsk3.TSK_FS_TYPE_XFS:
-            self.journal_parser = xfs.JournalParserXfs(self.img_info, self.fs_info, offset, debug)
+            self.journal_parser = xfs.JournalParserXfs(self.img_info, self.fs_info, args)
         else:
             msg = "Unsupported file system is contained."
             raise TypeError(msg)

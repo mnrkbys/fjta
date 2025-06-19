@@ -24,6 +24,7 @@
 import copy
 import json
 import math
+from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
@@ -235,8 +236,8 @@ class JournalDescriptorNotFoundError(Exception):
 
 
 class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt4]):
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, offset: int = 0, debug: bool = False) -> None:
-        super().__init__(img_info, fs_info, offset, debug)
+    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, args: Namespace) -> None:
+        super().__init__(img_info, fs_info, args)
 
     def _create_transaction(self, tid: int) -> JournalTransactionExt4:
         return JournalTransactionExt4(tid)
@@ -858,8 +859,10 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             transaction = self.transactions[tid]
             commit_time_f = float(f"{transaction.commit_time}.{transaction.commit_time_nanoseconds:09d}")
             for inode_num in transaction.entries:
-                if inode_num <= 11 and inode_num != 2:
-                    continue  # Skip special inodes
+                # Skip special inodes except the root inode
+                # root inode is 2, and it is not a special inode.
+                if not self.special_inodes and inode_num <= 11 and inode_num != 2:
+                    continue
                 transaction_entry = transaction.entries[inode_num]
                 # Generate working_entriy and first timeline event for each inode
                 if not working_entries.get(inode_num):
@@ -887,19 +890,13 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             label="Crtime",
                             follow=False,
                         )
-                        info = self._append_msg(
-                            info,
-                            msg,
-                        )
+                        info = self._append_msg(info, msg)
 
                     # Create hard link
                     if action & Actions.CREATE_INODE:
                         action |= Actions.CREATE_HARDLINK
                         if transaction_entry.link_count > 0:
-                            info = self._append_msg(
-                                info,
-                                f"Link Count: {transaction_entry.link_count}",
-                            )
+                            info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
 
                     # Delete inode
                     # The deletion time of XFS inodes is the same as ctime.
@@ -911,10 +908,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             label="Dtime",
                             follow=False,
                         )
-                        info = self._append_msg(
-                            info,
-                            msg,
-                        )
+                        info = self._append_msg(info, msg)
 
                     # Timestomp atime
                     if atime_f < crtime_f:

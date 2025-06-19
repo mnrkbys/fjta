@@ -24,12 +24,11 @@ from pathlib import Path
 
 from journalparser import journalparser
 
-VERSION = "20250618"
+VERSION = "20250619"
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="Forensic Journal Timeline Analyzer (FJTA)",
         description="Generate a timeline of file system events from the journal log.",
     )
     parser.add_argument(
@@ -54,15 +53,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--debug",
         action="store_true",
-        default=False,
         help="Enable debug mode. (Default: False)",
     )
-    # parser.add_argument(
-    #     "--special-inodes",
-    #     action="store_true",
-    #     default=False,
-    #     help="Include special inodes in the timeline. (Default: False)",
-    # )
+    parser.add_argument(
+        "--special-inodes",
+        action="store_true",
+        help="Include special inodes in the timeline. (Default: False)",
+    )
     parser.add_argument(
         "-v",
         "--version",
@@ -81,7 +78,7 @@ def main() -> None:
     if not full_path.is_file():
         print(f"Error: The specified image file '{full_path}' does not exist.", file=sys.stderr)
         sys.exit(1)
-    parser = journalparser.JournalParser(full_path, args.offset, args.debug)
+    parser = journalparser.JournalParser(full_path, args)
     parser.parse_journal()
     parser.timeline()
 

@@ -721,7 +721,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         # The deletion time of XFS inodes is the same as ctime.
         if (
             transaction_entry.file_type == FileTypes.UNKNOWN
-            and transaction_entry.mode == 0
+            and transaction_entry.mode in (0, 0x200)  # In some cases, mode is 0x200 (0o1000) for deleted inodes.
             and transaction_entry.size == 0
             and transaction_entry.link_count == 0
         ):
@@ -755,7 +755,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
 
                         if transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
                             action |= Actions.CREATE_INODE
-                            msg = self.format_timestamp(current_crtime, current_crtime_nanoseconds, label="Crtime", follow=False)
+                            msg = self.format_timestamp(new_crtime, new_crtime_nanoseconds, label="Crtime", follow=False)
                         else:
                             msg = self.format_timestamp(
                                 current_crtime,
@@ -889,7 +889,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                         elif new_value & xfs_structs.XFS_DIFLAG_NOATIME:
                             info = self._append_msg(info, "NoAtime", " ")
                         elif new_value & xfs_structs.XFS_DIFLAG_PREALLOC:
-                            info = self._append_msg(info, "Preallocated", "")
+                            info = self._append_msg(info, "Preallocated", " ")
                     case "symlink_target":
                         action |= Actions.CHANGE_SYMLINK_TARGET
                         info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")
@@ -1069,7 +1069,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                         elif transaction_entry.flags & xfs_structs.XFS_DIFLAG_NOATIME:
                             info = self._append_msg(info, "NoAtime", " ")
                         elif transaction_entry.flags & xfs_structs.XFS_DIFLAG_PREALLOC:
-                            info = self._append_msg(info, "Preallocated", "")
+                            info = self._append_msg(info, "Preallocated", " ")
 
                     # Update working_entry with transaction_entry
                     working_entries[inode_num].associated_dirs = copy.deepcopy(transaction_entry.associated_dirs)

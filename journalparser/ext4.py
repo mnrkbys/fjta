@@ -656,7 +656,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
                         if transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
                             action |= Actions.CREATE_INODE
-                            msg = self.format_timestamp(current_crtime, current_crtime_nanoseconds, label="Crtime", follow=False)
+                            msg = self.format_timestamp(new_crtime, new_crtime_nanoseconds, label="Crtime", follow=False)
                         else:
                             msg = self.format_timestamp(
                                 current_crtime,
@@ -799,7 +799,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         if new_value & ext4_structs.EXT4_IMMUTABLE_FL:
                             info = self._append_msg(info, "Immutable", " ")
                         elif new_value & ext4_structs.EXT4_NOATIME_FL:
-                            info = self._append_msg(info, "NoAtime", "")
+                            info = self._append_msg(info, "NoAtime", " ")
                     case "symlink_target":
                         action |= Actions.CHANGE_SYMLINK_TARGET
                         info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")

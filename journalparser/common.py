@@ -257,6 +257,9 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 transaction_entry.names = copy.deepcopy(working_entry.names)
         else:
             for associated_dir in transaction_entry.associated_dirs:
+                if not transaction_dents.get(associated_dir) or not transaction_dents[associated_dir].entries.get(transaction_entry.inode):
+                    # transaction_dents[associated_dir].entries[transaction_entry.inode] = []
+                    continue
                 current_names.update({associated_dir: transaction_dents[associated_dir].entries[transaction_entry.inode]})
 
         # added_assciated_dirs = set(transaction_entry.associated_dirs) - set(working_entry.associated_dirs)

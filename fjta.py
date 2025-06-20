@@ -20,16 +20,15 @@
 
 import argparse
 import sys
-from pathlib import Path
 
 from journalparser import journalparser
 
-VERSION = "20250619"
+VERSION = "20250621"
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a timeline of file system events from the journal log.",
+        description="Generate a timeline of file system activities from the filesystem journal log.",
     )
     parser.add_argument(
         "-i",
@@ -68,17 +67,12 @@ def parse_arguments() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
 def main() -> None:
     if not args.image:
-        print("Please specify a disk image file.")
+        print("Please specify a disk image file.", file=sys.stderr)
         sys.exit(1)
 
-    full_path = Path(args.image).expanduser().resolve()
-    if not full_path.is_file():
-        print(f"Error: The specified image file '{full_path}' does not exist.", file=sys.stderr)
-        sys.exit(1)
-    parser = journalparser.JournalParser(full_path, args)
+    parser = journalparser.JournalParser(args.image, args)
     parser.parse_journal()
     parser.timeline()
 

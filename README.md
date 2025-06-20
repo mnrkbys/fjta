@@ -1,6 +1,6 @@
 # FJTA - Forensic Journal Timeline Analyzer
 
-FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesystem (ext4, XFS) journals (not systemd-journald logs), generates timelines, and detects suspicious activity.
+FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesystem (ext4, XFS) journals (not systemd-journald logs), generates timelines, and detects suspicious activities.
 
 > [!CAUTION]
 > Since testing is only being done with simple disk images, there may be many issues when analyzing more practical disk images.

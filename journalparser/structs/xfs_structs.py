@@ -157,6 +157,7 @@ XLOG_CONTINUE_TRANS = 0x04  # Continue this transaction into a new log record.
 XLOG_WAS_CONT_TRANS = 0x08  # This transaction started in a previous log record.
 XLOG_END_TRANS = 0x10  # End of a continued transaction.
 XLOG_UNMOUNT_TRANS = 0x20  # Transaction to unmount a filesystem.
+XLOG_OPERATION_FLAGS_ALL = XLOG_START_TRANS | XLOG_COMMIT_TRANS | XLOG_CONTINUE_TRANS | XLOG_WAS_CONT_TRANS | XLOG_END_TRANS | XLOG_UNMOUNT_TRANS
 
 
 # XFS Log Item structure
@@ -687,9 +688,17 @@ xfs_dir2_data_entry = Struct(
     "namelen" / Int8ub,  # 0x08: Length of the name, in bytes.
     "name" / Bytes(lambda ctx: ctx.namelen),  # 0x09: The name associated with this entry.
     "ftype" / Int8ub,  # 0x09 + namelen: The type of the inode.
-    "pad" / Padding(lambda ctx: (4 - ctx.namelen % 4)),  # Padding to align to 4 bytes. Not stated in the specification.
+    # "pad" / Padding(lambda ctx: (4 - ctx.namelen % 4)),  # Padding to align to 4 bytes. Not stated in the specification.
     # "pad" / Padding(lambda ctx: (4 - (ctx.namelen % 4)) % 4),  # Padding to align to 4 bytes. Not stated in the specification.
-    "tag" / Int16ub,  # 0x0A + namelen: Starting offset of the entry, in bytes.
+    # "pad" / Padding(lambda ctx: (8 - (0x8 + 0x1 + ctx.namelen + 0x1 + 0x2) % 8)),  # Padding to align to 8 bytes. Not stated in the specification.
+    # "pad"
+    # / Padding(
+    #     lambda ctx: (lambda n: 0 if n == 8 else n)(
+    #         8 - ((0x8 + 0x1 + ctx.namelen + 0x1 + 0x2) % 8),
+    #     ),
+    # ),
+    "pad" / Padding(lambda ctx: (8 - (0x8 + 0x1 + ctx.namelen + 0x1 + 0x2) % 8) % 8),  # Padding to align to 8 bytes. Not stated in the specification.
+    "tag" / Int16ub,  # 0x0A + namelen + pad: Starting offset of the entry, in bytes.
 )
 
 # XFS Directory Data Unused structure

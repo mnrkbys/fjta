@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
 
 import pytsk3
-from construct import Container
+from construct import Container, StreamError
 
 
 class FileTypes(IntEnum):
@@ -221,7 +221,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             self.journal_file = self.fs_info.open_meta(self.fs_info.info.journ_inum)
         self.transactions: dict[int, T] = {}  # dict[transaction_id, JournalTransaction]
 
-    def dbg_print(self, msg: str | Container) -> None:
+    def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
             print(msg)
 
@@ -307,17 +307,19 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         return added, removed
 
     @staticmethod
-    def _contains_control_chars(s: str) -> bool:
+    def _contains_control_chars(s: str, include_null: bool = False) -> bool:
+        if include_null:
+            return any(0x00 <= ord(c) <= 0x1F for c in s)
         # except for null (0x00)
         return any(0x01 <= ord(c) <= 0x1F for c in s)
 
     @classmethod
-    def _contains_control_chars_bytes(cls, data: bytes) -> bool:
+    def _contains_control_chars_bytes(cls, data: bytes, include_null: bool = False) -> bool:
         try:
             s = data.decode("utf-8")
         except UnicodeDecodeError:
             return True
-        return cls._contains_control_chars(s)
+        return cls._contains_control_chars(s, include_null)
 
     @staticmethod
     def format_timestamp(

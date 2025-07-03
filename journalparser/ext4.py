@@ -310,9 +310,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         self.jbd2_feature_incompat_64bit = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_64BIT)
         self.jbd2_feature_incompat_csum_v2 = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_CSUM_V2)
         self.jbd2_feature_incompat_csum_v3 = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_CSUM_V3)
-        # if not (self.jbd2_feature_incompat_csum_v2 or self.jbd2_feature_incompat_csum_v3):
-        #     msg = f"Unknown feature incompat value: {self.journal_superblock.s_feature_incompat}"
-        #     raise ValueError(msg)
 
     def _find_first_descriptor_block(self) -> int:
         journal_sb = self.journal_superblock
@@ -332,25 +329,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
     def _parse_descriptor_block_tags(self, data: bytes) -> list[Container]:
         idx = journal_header_s.sizeof()  # Skip journal header
-        tags = []
-        # while idx < len(data):
-        #     if self.jbd2_feature_incompat_csum_v3:
-        #         tag_size = journal_block_tag3_s.sizeof()
-        #         tag_data = data[idx : idx + tag_size]
-        #     else:
-        #         tag_size = journal_block_tag_s.sizeof()
-        #         tag_data = data[idx : idx + tag_size]
+        tags: list[Container] = []
 
-        #     idx += tag_size
-        #     if tag_data == b"\x00" * tag_size:  # Skip empty tag
-        #         continue
-
-        #     tag = journal_block_tag3_s.parse(tag_data) if self.jbd2_feature_incompat_csum_v3 else journal_block_tag_s.parse(tag_data)
-        #     tags.append(tag)
-        #     if tag.t_flags & ext4_structs.JBD2_FLAG_LAST_TAG:
-        #         break
-
-        # tag_size = journal_block_tag3_s.sizeof() if self.jbd2_feature_incompat_csum_v3 else journal_block_tag_s.sizeof()
         if self.jbd2_feature_incompat_csum_v3:
             tag_size = journal_block_tag3_s.sizeof()
             journal_block_tag = journal_block_tag3_s
@@ -359,14 +339,11 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             journal_block_tag = journal_block_tag_s
 
         while idx <= len(data) - tag_size:
-            # tag_data = data[idx : idx + tag_size] if self.jbd2_feature_incompat_csum_v3 else data[idx : idx + tag_size]
             tag_data = data[idx : idx + tag_size]
-
             idx += tag_size
             if tag_data == b"\x00" * tag_size:  # Skip empty tag
                 continue
 
-            # tag = journal_block_tag3_s.parse(tag_data) if self.jbd2_feature_incompat_csum_v3 else journal_block_tag_s.parse(tag_data)
             tag = journal_block_tag.parse(tag_data)
             tags.append(tag)
             if tag.t_flags & ext4_structs.JBD2_FLAG_LAST_TAG:
@@ -389,12 +366,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         idx = offset
         eattrs: list[ExtendedAttribute] = []
         while idx < len(data):
-            ea_name = ""
+            ea_name: str = ""
             ea_entry = ext4_xattr_entry.parse(data[idx:])
-            # if ea_entry.e_name_len % 4 != 0:
-            #     entry_size = 0x10 + ea_entry.e_name_len + (4 - (ea_entry.e_name_len % 4))
-            # else:
-            #     entry_size = 0x10 + ea_entry.e_name_len + (ea_entry.e_name_len % 4)
             entry_size = 0x10 + ea_entry.e_name_len + ((4 - (ea_entry.e_name_len % 4)) % 4)
             if ea_entry.e_name_len == 0 and ea_entry.e_name_index == 0 and ea_entry.e_value_offs == 0 and ea_entry.e_value_inum == 0:
                 break
@@ -408,7 +381,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         return eattrs
 
     def _parse_ea_in_inode(self, data: bytes) -> list[ExtendedAttribute]:
-        idx = 0
+        idx: int = 0
         eattrs: list[ExtendedAttribute] = []
         try:
             _ = ext4_xattr_ibody_header.parse(data[idx : idx + ext4_xattr_ibody_header.sizeof()])
@@ -551,7 +524,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                                 dir_inode = 0
                                                 parent_inode = 0
                                                 self.dbg_print("Directory entry:")
-                                                # self.dbg_print(data_block[:0x30])
                                                 for dir_entry in self._parse_directory_entries(data_block):
                                                     if dir_entry:
                                                         self.dbg_print(dir_entry)
@@ -595,13 +567,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         inode_num: int,
         working_entry: EntryInfoExt4,
     ) -> TimelineEventInfo | None:
-        # print("=" * 50)
-        # print(f"_generate_timeline_event2: tid={transaction.tid}")
-        # print(f"_generate_timeline_event2: inode_num={inode_num}")
-        # print(f"_generate_timeline_event2: working_entry={working_entry}")
-        # print(f"_generate_timeline_event2: transaction.entries[{inode_num}]={transaction.entries[inode_num]}")
-        # print(f"_generate_timeline_event2: transaction.dents={transaction.dents}")
-
         tid = transaction.tid
         transaction_entry = transaction.entries[inode_num]
 
@@ -622,14 +587,18 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         self._build_names_from_entries(working_entry, transaction_entry, transaction.dents)
 
         # Delete inode
-        # The ext4 inodes have a dtime field but ctime (and mtime) is more reliable for deletion detection.
+        # The ext4 inodes have a dtime field but ctime (or mtime) is more reliable for deletion detection. Because the ext4 inodes do not have a nanosecond field for dtime.
         if transaction_entry.dtime != 0:
+            if transaction_entry.dtime == transaction_entry.ctime:
+                dtime = transaction_entry.ctime
+                dtime_nanoseconds = transaction_entry.ctime_nanoseconds
+            else:
+                dtime = transaction_entry.dtime
+                dtime_nanoseconds = transaction_entry.dtime_nanoseconds
             action |= Actions.DELETE_INODE
             msg = self.format_timestamp(
-                # transaction_entry.dtime,
-                # transaction_entry.dtime_nanoseconds,
-                transaction_entry.ctime,
-                transaction_entry.ctime_nanoseconds,
+                dtime,
+                dtime_nanoseconds,
                 label="Dtime",
                 follow=False,
             )
@@ -689,16 +658,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             )
                             msg += " (Timestomp: commit_time < crtime)"
                         info = self._append_msg(info, msg)
-                    # case "dtime":
-                    #     action |= Actions.DELETE_INODE
-                    #     new_dtime = new_value
-                    #     msg = self.format_timestamp(
-                    #         new_dtime,
-                    #         transaction_entry.dtime_nanoseconds,
-                    #         label="Dtime",
-                    #         follow=False,
-                    #     )
-                    #     info = self._append_msg(info, msg)
                     case "atime":
                         action |= Actions.ACCESS
                         current_atime = current_value
@@ -860,7 +819,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             commit_time_f = float(f"{transaction.commit_time}.{transaction.commit_time_nanoseconds:09d}")
             for inode_num in transaction.entries:
                 # Skip special inodes except the root inode
-                # root inode is 2, and it is not a special inode.
+                # The root inode number is 2 and it is hanled as a normal inode here.
                 if not self.special_inodes and inode_num <= 11 and inode_num != 2:
                     continue
                 transaction_entry = transaction.entries[inode_num]
@@ -901,10 +860,16 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     # Delete inode
                     # The deletion time of XFS inodes is the same as ctime.
                     if transaction_entry.dtime != 0:
+                        if transaction_entry.dtime == transaction_entry.ctime:
+                            dtime = transaction_entry.ctime
+                            dtime_nanoseconds = transaction_entry.ctime_nanoseconds
+                        else:
+                            dtime = transaction_entry.dtime
+                            dtime_nanoseconds = transaction_entry.dtime_nanoseconds
                         action |= Actions.DELETE_INODE
                         msg = self.format_timestamp(
-                            transaction_entry.dtime,
-                            transaction_entry.dtime_nanoseconds,
+                            dtime,
+                            dtime_nanoseconds,
                             label="Dtime",
                             follow=False,
                         )

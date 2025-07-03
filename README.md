@@ -17,8 +17,8 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Artifacts                              |  ext4  |  XFS  |
 |----------------------------------------|:------:|:-----:|
 | inode                                  | ✅     | ✅    |
-| Few files in directory entries         | ✅     | ✅    |
-| Many files in directory entries        | ✅     | ✅    |
+| Directories with few entries           | ✅     | ✅    |
+| Directories with many entries          | ✅     | ✅    |
 | Short symlink target names             | ✅     | ✅    |
 | Long symlink target names              | ✅     | ❌    |
 | Short extended attributes              | ✅     | ✅    |
@@ -37,7 +37,7 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Other inode metadata changes          | ✅     | ✅    |
 
 > [!NOTE]
-> "Other inode metadata changes" include updates to MACB times (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
+> "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
 
 ## Requirements
 

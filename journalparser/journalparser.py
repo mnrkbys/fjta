@@ -24,8 +24,7 @@ class JournalParser:
         self.fs_info = pytsk3.FS_Info(self.img_info, args.offset)
         if self.fs_info.info.ftype == pytsk3.TSK_FS_TYPE_EXT4:
             self.journal_parser = ext4.JournalParserExt4(self.img_info, self.fs_info, args)
-        # elif self.fs_info.info.ftype == 0x80000:  # pytsk3.TSK_FS_TYPE_XFS:
-        elif self.fs_info.info.ftype == pytsk3.TSK_FS_TYPE_XFS:
+        elif self.fs_info.info.ftype == pytsk3.TSK_FS_TYPE_XFS:  # pytsk3.TSK_FS_TYPE_XFS = 0x80000
             self.journal_parser = xfs.JournalParserXfs(self.img_info, self.fs_info, args)
         else:
             msg = "Unsupported file system is contained."

@@ -572,7 +572,6 @@ ext4_xattr_entry = Struct(
     "e_value_size" / Int32ul,  # Length of attribute value
     "e_hash" / Int32ul,  # Hash value of attribute name and attribute value
     "e_name" / Bytes(lambda ctx: ctx.e_name_len),  # Attribute name
-    # "padding" / Padding(lambda ctx: 4 - (ctx.e_name_len % 4)),  # Padding to align to 4 bytes
     "padding" / Padding(lambda ctx: (4 - (ctx.e_name_len % 4)) % 4),  # Padding to align to 4 bytes
 )
 

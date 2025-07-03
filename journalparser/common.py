@@ -185,11 +185,6 @@ class TimelineEventInfo:
     device_number: DeviceNumber = field(default_factory=DeviceNumber)
     info: str = ""
 
-    # def __str__(self) -> str:
-    #     name_str = ", ".join(self.name)
-    #     extended_attributes_str = ", ".join([f"{ea.name}: {ea.value}" for ea in self.extended_attributes])
-    #     return f"{self.transaction_id}|{self.inode}|{self.file_type}|{name_str}|{self.action}|{self.dir_inode}|{self.parent_inode}|{self.mode:04o}|{self.uid}|{self.gid}|{extended_attributes_str}|{self.info}"
-
     def to_dict(self) -> dict:
         result = {}
         for tl_field in self.__dataclass_fields__:
@@ -258,11 +253,9 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         else:
             for associated_dir in transaction_entry.associated_dirs:
                 if not transaction_dents.get(associated_dir) or not transaction_dents[associated_dir].entries.get(transaction_entry.inode):
-                    # transaction_dents[associated_dir].entries[transaction_entry.inode] = []
                     continue
                 current_names.update({associated_dir: transaction_dents[associated_dir].entries[transaction_entry.inode]})
 
-        # added_assciated_dirs = set(transaction_entry.associated_dirs) - set(working_entry.associated_dirs)
         deleted_associated_dirs = set(working_entry.associated_dirs) - set(transaction_entry.associated_dirs)
         for associated_dir in deleted_associated_dirs:
             current_names.pop(associated_dir, None)

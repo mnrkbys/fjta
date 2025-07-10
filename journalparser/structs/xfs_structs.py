@@ -445,7 +445,7 @@ XFS_DIFLAG2_METADATA = 1 << 5  # metadata inode
 
 
 # for detecting the size of xfs_dir2_sf_*
-xsf_dir2_sf_hdr_x = Struct(
+xfs_dir2_sf_hdr_x = Struct(
     "count" / Int8ub,  # 0x00: Number of directory entries.
     "i8count" / Int8ub,  # 0x01: Number of directory entries requiring 64-bit entries.
 )

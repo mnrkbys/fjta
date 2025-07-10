@@ -300,19 +300,16 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         return added, removed
 
     @staticmethod
-    def _contains_control_chars(s: str, include_null: bool = False) -> bool:
-        if include_null:
-            return any(0x00 <= ord(c) <= 0x1F for c in s)
-        # except for null (0x00)
-        return any(0x01 <= ord(c) <= 0x1F for c in s)
+    def _contains_control_chars(s: str, th_min: int = 0x01, th_max: int = 0x1F) -> bool:
+        return any(th_min <= ord(c) <= th_max for c in s)
 
     @classmethod
-    def _contains_control_chars_bytes(cls, data: bytes, include_null: bool = False) -> bool:
+    def _contains_control_chars_bytes(cls, data: bytes, th_min: int = 0x01, th_max: int = 0x1F) -> bool:
         try:
             s = data.decode("utf-8")
         except UnicodeDecodeError:
             return True
-        return cls._contains_control_chars(s, include_null)
+        return cls._contains_control_chars(s, th_min, th_max)
 
     @staticmethod
     def format_timestamp(

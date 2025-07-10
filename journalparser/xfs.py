@@ -63,6 +63,7 @@ from journalparser.structs.xfs_structs import (
     xfs_dir2_sf_entry_8,
     xfs_dir2_sf_hdr_4,
     xfs_dir2_sf_hdr_8,
+    xfs_dir2_sf_hdr_x,
     xfs_dir3_data_hdr,
     xfs_dsb,
     xfs_inode_log_format_64_be,
@@ -73,7 +74,6 @@ from journalparser.structs.xfs_structs import (
     xfs_trans_header_le,
     xlog_op_header,
     xlog_rec_header,
-    xsf_dir2_sf_hdr_x,
 )
 
 
@@ -374,21 +374,38 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 break
         return log_ops
 
-    # def _brute_force_namelen(self, data: bytes, idx: int, dsize: int) -> int:
-    #     namelen = 0
-    #     while idx < dsize:
-    #         entry = self.xfs_dir2_sf_entry.parse(namelen.to_bytes(1, "big") + data[idx + 1 :])
-    #         if entry.namelen > 0 and entry.ftype >= xfs_structs.XFS_DIR3_FT_REG_FILE and entry.ftype <= xfs_structs.XFS_DIR3_FT_SYMLINK:
-    #             return namelen
-    #         namelen += 1
-    #     return -1
+    def _brute_force_xfs_dir2_sf_entry(self, data: bytes) -> Container | None:
+        namelen = 1
+        while namelen < len(data):
+            try:
+                tmp_data = namelen.to_bytes(1, "big") + data[1:]
+                self.dbg_print(f"_brute_force_xfs_dir2_sf_entry tmp_data: {tmp_data}")
+                dir2_sf_entry = self.xfs_dir2_sf_entry.parse(tmp_data)
+                self.dbg_print(f"_brute_force_xfs_dir2_sf_entry dir2_sf_entry: {dir2_sf_entry}")
+                # if self._contains_control_chars_bytes(dir2_sf_entry.name, include_null=True):
+                #     return None
+                # dir2_sf_entry.name.decode("utf-8")  # Check if the name can be decoded
+                if (
+                    # xfs_structs.XFS_DIR3_FT_REG_FILE <= dir2_sf_entry.ftype <= xfs_structs.XFS_DIR3_FT_SYMLINK
+                    xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_sf_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT
+                    and not self._contains_control_chars_bytes(dir2_sf_entry.name, th_min=0x02)
+                ):
+                    return dir2_sf_entry
+                namelen += 1
+                if namelen > 255:
+                    break
+            except (StreamError, UnicodeDecodeError) as err:
+                self.dbg_print(f"_brute_force_xfs_dir2_sf_entry exception: {err}")
+                self.dbg_print(f"_brute_force_xfs_dir2_sf_entry exception: {data}")
+                return None
+        return None
 
     def _parse_directory_entries_shortform(self, log_op: XfsLogOperation, dsize: int) -> tuple[int, list[Container]]:
         data = log_op.item_data
         self.dbg_print(f"_parse_directory_entries_shortform data: {data}")
         dir_entries: list[Container] = []
         idx = 0
-        sf_hdr_x = xsf_dir2_sf_hdr_x.parse(data[idx : idx + 2])
+        sf_hdr_x = xfs_dir2_sf_hdr_x.parse(data[idx : idx + 2])
         self.dbg_print(f"_parse_directory_entries_shortform sf_hdr_x: {sf_hdr_x}")
 
         if (sf_hdr_x.count > 0 and sf_hdr_x.i8count == 0) or (sf_hdr_x.count == 0 and sf_hdr_x.i8count == 0):
@@ -411,21 +428,28 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 self.dbg_print(f"_parse_directory_entries_shortform idx: {idx}")
                 dir2_sf_entry = self.xfs_dir2_sf_entry.parse(data[idx:dsize])
                 self.dbg_print(f"_parse_directory_entries_shortform dir2_sf_entry: {dir2_sf_entry}")
+                # dir2_sf_entry.name.decode("utf-8")  # Check if the name can be decoded
                 if (
                     dir2_sf_entry.namelen == 0
-                    or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
-                    or dir2_sf_entry.ftype > xfs_structs.XFS_DIR3_FT_SYMLINK
-                    # or self._contains_control_chars_bytes(dir2_sf_entry.name)
+                    # or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
+                    # or dir2_sf_entry.ftype > xfs_structs.XFS_DIR3_FT_SYMLINK
+                    or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_UNKNOWN
+                    or dir2_sf_entry.ftype > xfs_structs.XFS_DIR3_FT_WHT
+                    or self._contains_control_chars_bytes(dir2_sf_entry.name, th_min=0x02)
                 ):
-                    # namelen = self._brute_force_namelen(data, idx, dsize)
-                    # if namelen == -1:
-                    #     break
-                    # dir2_sf_entry.namelen = namelen
-                    break
+                    self.dbg_print(f"Invalid directory entry: {dir2_sf_entry}")
+                    dir2_sf_entry = self._brute_force_xfs_dir2_sf_entry(data[idx:dsize])
+                    if dir2_sf_entry is None:
+                        self.dbg_print(f"Failed to brute force xfs_dir2_sf_entry: {data[idx:]}")
+                        idx += 1
+                        continue
                 idx += 0x1 + 0x2 + dir2_sf_entry.namelen + 0x1 + inumber_len  # xfs_dir2_sf_entry.offset is not used in short form
+                # If control code is included in dir2_sf_entry.name, it may not be appended.
                 dir_entries.append(dir2_sf_entry)
-            except StreamError:
-                break
+            except (StreamError, UnicodeDecodeError) as err:
+                self.dbg_print(f"_parse_directory_entries_shortform exception: {err}")
+                self.dbg_print(f"_parse_directory_entries_shortform exception: {data[idx:]}")
+                idx += 1
 
         return dir2_sf_hdr.parent, dir_entries
 
@@ -560,7 +584,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         return inode, dir_entries, eattrs, symlink_target, device_number, parent_inode
 
     def _brute_force_xfs_dir2_data_entry(self, data: bytes) -> Container | None:
-        namelen = 0
+        namelen = 1
         while namelen < len(data):
             tmp_data = data[0:8]
             tmp_data += namelen.to_bytes(1, "big")
@@ -569,9 +593,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             dir2_data_entry = xfs_dir2_data_entry.parse(tmp_data)
             self.dbg_print(f"_brute_force_xfs_dir2_data_entry dir2_data_entry: {dir2_data_entry}")
             if (
-                0 < dir2_data_entry.ftype < 8
+                # xfs_structs.XFS_DIR3_FT_REG_FILE <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_SYMLINK
+                xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT
                 and dir2_data_entry.tag >= 64
-                and not self._contains_control_chars_bytes(dir2_data_entry.name, include_null=True)
+                and not self._contains_control_chars_bytes(dir2_data_entry.name, th_min=0x02)
             ):
                 return dir2_data_entry
             namelen += 1
@@ -592,9 +617,12 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                     idx += dir2_data_unused.length
                     continue
                 elif (
-                    dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
-                    or dir2_data_entry.ftype >= xfs_structs.XFS_DIR3_FT_WHT
+                    # dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
+                    # or dir2_data_entry.ftype >= xfs_structs.XFS_DIR3_FT_WHT
+                    dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_UNKNOWN
+                    or dir2_data_entry.ftype > xfs_structs.XFS_DIR3_FT_WHT
                     or dir2_data_entry.tag < 64
+                    or self._contains_control_chars_bytes(dir2_data_entry.name, th_min=0x02)
                 ):
                     dir2_data_entry = self._brute_force_xfs_dir2_data_entry(data[idx:])
                     if dir2_data_entry is None:
@@ -602,6 +630,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                         break
                 padding_len = (8 - (0x8 + 0x1 + dir2_data_entry.namelen + 0x1 + 0x2) % 8) % 8
                 idx += 0x8 + 0x1 + dir2_data_entry.namelen + 0x1 + padding_len + 0x2
+                # If control code is included in dir2_data_entry.name, it may not be appended.
                 yield dir2_data_entry
         except StreamError:
             pass

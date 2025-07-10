@@ -1162,21 +1162,21 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
 
                     # Delete inode
                     # The deletion time of XFS inodes is the same as ctime.
-                    if (
-                        transaction_entry.file_type == FileTypes.UNKNOWN
-                        and transaction_entry.mode == 0
-                        and transaction_entry.size == 0
-                        and transaction_entry.link_count == 0
-                    ):
-                        action |= Actions.DELETE_INODE
-                        msg = self.format_timestamp(
-                            transaction_entry.ctime,
-                            transaction_entry.ctime_nanoseconds,
-                            label="Dtime",
-                            follow=False,
-                        )
-                        info = self._append_msg(info, msg)
-                        dtime_f = ctime_f
+                    # if (
+                    #     transaction_entry.file_type == FileTypes.UNKNOWN
+                    #     and transaction_entry.mode == 0
+                    #     and transaction_entry.size == 0
+                    #     and transaction_entry.link_count == 0
+                    # ):
+                    #     action |= Actions.DELETE_INODE
+                    #     msg = self.format_timestamp(
+                    #         transaction_entry.ctime,
+                    #         transaction_entry.ctime_nanoseconds,
+                    #         label="Dtime",
+                    #         follow=False,
+                    #     )
+                    #     info = self._append_msg(info, msg)
+                    #     dtime_f = ctime_f
 
                     # Timestomp atime
                     if atime_f < crtime_f:

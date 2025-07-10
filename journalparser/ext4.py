@@ -859,21 +859,21 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
                     # Delete inode
                     # The deletion time of XFS inodes is the same as ctime.
-                    if transaction_entry.dtime != 0:
-                        if transaction_entry.dtime == transaction_entry.ctime:
-                            dtime = transaction_entry.ctime
-                            dtime_nanoseconds = transaction_entry.ctime_nanoseconds
-                        else:
-                            dtime = transaction_entry.dtime
-                            dtime_nanoseconds = transaction_entry.dtime_nanoseconds
-                        action |= Actions.DELETE_INODE
-                        msg = self.format_timestamp(
-                            dtime,
-                            dtime_nanoseconds,
-                            label="Dtime",
-                            follow=False,
-                        )
-                        info = self._append_msg(info, msg)
+                    # if transaction_entry.dtime != 0:
+                    #     if transaction_entry.dtime == transaction_entry.ctime:
+                    #         dtime = transaction_entry.ctime
+                    #         dtime_nanoseconds = transaction_entry.ctime_nanoseconds
+                    #     else:
+                    #         dtime = transaction_entry.dtime
+                    #         dtime_nanoseconds = transaction_entry.dtime_nanoseconds
+                    #     action |= Actions.DELETE_INODE
+                    #     msg = self.format_timestamp(
+                    #         dtime,
+                    #         dtime_nanoseconds,
+                    #         label="Dtime",
+                    #         follow=False,
+                    #     )
+                    #     info = self._append_msg(info, msg)
 
                     # Timestomp atime
                     if atime_f < crtime_f:

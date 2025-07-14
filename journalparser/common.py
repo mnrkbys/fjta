@@ -246,10 +246,13 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         # Build a directory entry (file name) list of inode (current transaction)
         current_names: dict[int, list[str]] = {}
         current_names = copy.deepcopy(working_entry.names)
+        # If transaction_entry.entryinfo_source does not have EntryInfoSource.DIR_ENTRY, just copy working_entry info.
+        # Because there is no new directory entries in the transaction
         if not (transaction_entry.entryinfo_source & EntryInfoSource.DIR_ENTRY):
             if working_entry.link_count == transaction_entry.link_count:
                 transaction_entry.associated_dirs = copy.deepcopy(working_entry.associated_dirs)
                 transaction_entry.names = copy.deepcopy(working_entry.names)
+        # transaction_entry probably has new directory entries, so we need to update names
         else:
             for associated_dir in transaction_entry.associated_dirs:
                 if not transaction_dents.get(associated_dir) or not transaction_dents[associated_dir].entries.get(transaction_entry.inode):

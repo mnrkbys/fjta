@@ -99,29 +99,24 @@ class ExtendedAttribute:
 class DentInfo:
     dir_inode: int = 0  # Inode number of the directory containing this entry
     parent_inode: int = 0  # Actually not needed?
-    entries: dict[int, list[str]] = field(default_factory=dict)  # dict[inode_num, list[name]]
+    block_entries: dict[int, dict[int, list[str]]] = field(default_factory=dict)  # dict[block_num, dict[inode_num, list[name]]]
 
-    def __hash__(self) -> int:
-        # Convert entries to a tuple to ensure immutability for hashing
-        entries_tuple = tuple((inode, tuple(names)) for inode, names in self.entries.items())
-        return hash((self.dir_inode, entries_tuple))
-
-    def __str__(self) -> str:
-        return f"dir_inode: {self.dir_inode}, parent_inode: {self.parent_inode}, entries: {[{inode: names} for inode, names in self.entries.items()]}"
-
-    def to_dict(self) -> dict:
-        return {
-            "dir_inode": self.dir_inode,
-            "parent_inode": self.parent_inode,
-            "entries": self.entries,
-        }
+    def find_names_by_inodenum(self, inode_num: int) -> list[str]:
+        """
+        Find names associated with a specific inode number.
+        Returns an empty list if the inode number is not found.
+        """
+        names: list[str] = []
+        for block_entry in self.block_entries.values():
+            if block_entry.get(inode_num) and block_entry[inode_num] not in names:
+                names.extend(block_entry[inode_num])
+        return list(set(names))
 
 
 @dataclass
 class EntryInfo:
     inode: int = 0
     file_type: FileTypes = FileTypes.UNKNOWN
-    associated_dirs: list[int] = field(default_factory=list)  # list of dir_inode numbers where this inode is referenced
     names: dict[int, list[str]] = field(default_factory=dict)  # dict[dir_inode, list[name]]
     mode: int = 0
     uid: int = 0
@@ -147,9 +142,9 @@ class EntryInfo:
 class JournalTransaction[T: EntryInfo]:
     tid: int  # transaction id
     entries: dict[int, T] = field(default_factory=dict)  # dict[inode_num, EntryInfo]
-    dents: dict[int, DentInfo] = field(default_factory=dict)  # dict[dir_inode, DentInfo]
+    dents2: dict[int, DentInfo] = field(default_factory=dict)  # dict[dir_inode, DentInfo]
 
-    def set_inode_info(self, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
+    def set_inode_info(self, block_num: int, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
         msg = "Subclasses must implement set_inode_info."
         raise NotImplementedError(msg)
 
@@ -157,9 +152,16 @@ class JournalTransaction[T: EntryInfo]:
         msg = "Subclasses must implement set_dir_entry_info."
         raise NotImplementedError(msg)
 
-    def set_dent_info(self, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container) -> None:
+    def set_dent_info(self, block_num: int, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container) -> None:
         msg = "Subclasses must implement set_dent_info."
         raise NotImplementedError(msg)
+
+    def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
+        names: dict[int, list[str]] = {}
+        for dir_inode, dents in self.dents2.items():
+            if tmp_names := dents.find_names_by_inodenum(inode_num):
+                names.update({dir_inode: tmp_names})
+        return names
 
 
 @dataclass
@@ -193,8 +195,8 @@ class TimelineEventInfo:
                 result[tl_field] = value.name
             elif isinstance(value, list) and all(isinstance(item, ExtendedAttribute) for item in value):
                 result[tl_field] = [item.to_dict() for item in value]
-            elif isinstance(value, dict) and all(isinstance(entry, DentInfo) for entry in value.values()):
-                result[tl_field] = {dir_inode: entry.to_dict() for dir_inode, entry in value.items()}
+            # elif isinstance(value, dict) and all(isinstance(entry, DentInfo) for entry in value.values()):
+            #     result[tl_field] = {dir_inode: entry.to_dict() for dir_inode, entry in value.items()}
             elif isinstance(value, DeviceNumber):
                 result[tl_field] = value.to_dict()
             else:
@@ -215,6 +217,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         if self.fs_info.info.journ_inum != 0:
             self.journal_file = self.fs_info.open_meta(self.fs_info.info.journ_inum)
         self.transactions: dict[int, T] = {}  # dict[transaction_id, JournalTransaction]
+        self.working_dents: dict[int, DentInfo] = {}  # dict[dir_inode, DentInfo]
 
     def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
@@ -232,39 +235,6 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def parse_journal(self) -> None:
         msg = "Subclasses must implement parse_journal."
         raise NotImplementedError(msg)
-
-    @staticmethod
-    def _build_names_from_entries(
-        working_entry: U,
-        transaction_entry: U,
-        transaction_dents: dict[int, DentInfo],
-    ) -> tuple[dict[int, list[str]], dict[int, list[str]]]:
-        # Build a directory entry (file name) list of inode (past transactions)
-        prev_names: dict[int, list[str]] = {}
-        prev_names = copy.deepcopy(working_entry.names)
-
-        # Build a directory entry (file name) list of inode (current transaction)
-        current_names: dict[int, list[str]] = {}
-        current_names = copy.deepcopy(working_entry.names)
-        # If transaction_entry.entryinfo_source does not have EntryInfoSource.DIR_ENTRY, just copy working_entry info.
-        # Because there is no new directory entries in the transaction
-        if not (transaction_entry.entryinfo_source & EntryInfoSource.DIR_ENTRY):
-            if working_entry.link_count == transaction_entry.link_count:
-                transaction_entry.associated_dirs = copy.deepcopy(working_entry.associated_dirs)
-                transaction_entry.names = copy.deepcopy(working_entry.names)
-        # transaction_entry probably has new directory entries, so we need to update names
-        else:
-            for associated_dir in transaction_entry.associated_dirs:
-                if not transaction_dents.get(associated_dir) or not transaction_dents[associated_dir].entries.get(transaction_entry.inode):
-                    continue
-                current_names.update({associated_dir: transaction_dents[associated_dir].entries[transaction_entry.inode]})
-
-        deleted_associated_dirs = set(working_entry.associated_dirs) - set(transaction_entry.associated_dirs)
-        for associated_dir in deleted_associated_dirs:
-            current_names.pop(associated_dir, None)
-        transaction_entry.names = copy.deepcopy(current_names)
-
-        return prev_names, current_names
 
     @staticmethod
     def _compare_entry_fields(current_entry: U, new_entry: U) -> list[tuple[str, any, any]]:
@@ -327,6 +297,29 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         if follow:
             msg += f" -> {datetime.fromtimestamp(new_timestamp, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{new_nanoseconds:09d} UTC"
         return msg
+
+    def update_directory_entries(self, transaction: T) -> None:
+        for dir_inode, dents in transaction.dents2.items():
+            if not self.working_dents.get(dir_inode):
+                self.working_dents[dir_inode] = copy.deepcopy(dents)
+            elif transaction.entries.get(dir_inode) and transaction.entries[dir_inode].entryinfo_source & EntryInfoSource.DIR_ENTRY:
+                # for block_num in self.working_dents[dir_inode].block_entries:
+                #     if dents.block_entries.get(block_num) is None:
+                #         continue
+                #     if not self.working_dents[dir_inode].block_entries.get(block_num):
+                #         self.working_dents[dir_inode].block_entries[block_num] = {}
+                #     self.working_dents[dir_inode].block_entries[block_num] = copy.deepcopy(dents.block_entries[block_num])
+                for block_num in dents.block_entries:
+                    if not self.working_dents[dir_inode].block_entries.get(block_num):
+                        self.working_dents[dir_inode].block_entries[block_num] = {}
+                    self.working_dents[dir_inode].block_entries[block_num] = copy.deepcopy(dents.block_entries[block_num])
+
+    def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
+        names: dict[int, list[str]] = {}
+        for dir_inode, dents in self.working_dents.items():
+            if tmp_names := dents.find_names_by_inodenum(inode_num):
+                names.update({dir_inode: tmp_names})
+        return names
 
     def timeline(self) -> None:
         msg = "Subclasses must implement timeline."

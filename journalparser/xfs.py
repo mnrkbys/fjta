@@ -118,7 +118,7 @@ class JournalTransactionXfs(JournalTransaction):
         seconds = cls._convert_to_epoch(seconds)
         return seconds, nanoseconds_remainder
 
-    def set_inode_info(self, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
+    def set_inode_info(self, block_num: int, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
         special_inodes = {
             128: "Root directory",
         }
@@ -128,12 +128,12 @@ class JournalTransactionXfs(JournalTransaction):
         entry = self.entries[inode_num]
         entry.inode = inode_num
         if special_inodes.get(inode_num):
-            if 128 not in entry.associated_dirs:
-                entry.associated_dirs.append(128)
             entry.names.update({128: [special_inodes[inode_num]]})
-            if not self.dents.get(128):
-                self.dents[128] = DentInfo(dir_inode=128, parent_inode=128)
-            self.dents[128].entries[inode_num] = [special_inodes[inode_num]]
+            if not self.dents2.get(128):
+                self.dents2[128] = DentInfo(dir_inode=128, parent_inode=128)
+            if not self.dents2[128].block_entries.get(block_num):
+                self.dents2[128].block_entries[block_num] = {}
+            self.dents2[128].block_entries[block_num].update({inode_num: [special_inodes[inode_num]]})
 
         match inode.di_mode & xfs_structs.S_IFMT:
             case xfs_structs.XFS_DIR3_FT_UNKNOWN:
@@ -178,22 +178,28 @@ class JournalTransactionXfs(JournalTransaction):
         entry.extended_attributes = eattrs
         entry.entryinfo_source |= EntryInfoSource.INODE
 
-    def set_dent_info(self, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | None) -> None:
+    def set_dent_info(self, block_num: int, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | list | None) -> None:
         # Set DentInfo
-        if not self.dents.get(dir_inode_num):
-            self.dents[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
-        dent = self.dents[dir_inode_num]
+        if dir_entry is not None:
+            if not self.dents2.get(dir_inode_num):
+                self.dents2[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
+            if not self.dents2[dir_inode_num].block_entries.get(block_num):
+                self.dents2[dir_inode_num].block_entries[block_num] = {}
+            dent = self.dents2[dir_inode_num].block_entries[block_num]
+            # Add EntryInfoSource.DIR_ENTRY to entries[dir_inode_num]
+            # This setting is required to mark directory entries recognized in the current transaction
+            # so they can be merged with entries from previous transactions.
+            if not self.entries.get(dir_inode_num):
+                self.entries[dir_inode_num] = EntryInfo(inode=dir_inode_num)
+            self.entries[dir_inode_num].entryinfo_source |= EntryInfoSource.DIR_ENTRY
+
         if dir_entry:
             try:
                 name = dir_entry.name.decode("utf-8")
-                # if name not in dent.entries.get(inode_num, []):
-                #     if not dent.entries.get(inode_num):
-                #         dent.entries[inode_num] = []
-                #     dent.entries[inode_num].append(name)
-                if not dent.entries.get(inode_num):
-                    dent.entries[inode_num] = []
-                if name not in dent.entries[inode_num]:
-                    dent.entries[inode_num].append(name)
+                if not dent.get(inode_num):
+                    dent[inode_num] = []
+                if name not in dent[inode_num]:
+                    dent[inode_num].append(name)
             except UnicodeDecodeError:
                 print(f"set_dent_info UnicodeDecodeError: {dir_entry}", file=sys.stderr)
 
@@ -202,9 +208,6 @@ class JournalTransactionXfs(JournalTransaction):
             if not self.entries.get(inode_num):
                 self.entries[inode_num] = EntryInfo(inode=inode_num)
             entry = self.entries[inode_num]
-
-            if dir_inode_num not in entry.associated_dirs:
-                entry.associated_dirs.append(dir_inode_num)
 
             # Set file type from directory entry
             match dir_entry.ftype:
@@ -305,9 +308,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             if (
                 op_header.oh_tid in tids
                 and op_header.oh_len <= len(data) - idx - xlog_op_header.sizeof()
-                and (
-                    op_header.oh_clientid == 0 or op_header.oh_clientid in (xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG)
-                )
+                and (op_header.oh_clientid in (0, xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG))
                 and (op_header.oh_flags == 0 or op_header.oh_flags & xfs_structs.XLOG_OPERATION_FLAGS_ALL)
             ):
                 self.dbg_print(f"_find_next_xlog_op_header found xlog_op_header: {op_header}")
@@ -345,9 +346,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 self.dbg_print(f"_parse_log_operations tids: {tids}")
                 if (
                     (len(tids) >= 2 and (op_header.oh_tid not in tids))
-                    or not (
-                        op_header.oh_flags == 0 or op_header.oh_clientid in (xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG)
-                    )
+                    or op_header.oh_clientid not in (0, xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG)
                     or not (op_header.oh_flags == 0 or op_header.oh_flags & xfs_structs.XLOG_OPERATION_FLAGS_ALL)
                 ):
                     if next_op_header := self._find_next_xlog_op_header(tids, data[idx:]):
@@ -382,9 +381,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 self.dbg_print(f"_brute_force_xfs_dir2_sf_entry tmp_data: {tmp_data}")
                 dir2_sf_entry = self.xfs_dir2_sf_entry.parse(tmp_data)
                 self.dbg_print(f"_brute_force_xfs_dir2_sf_entry dir2_sf_entry: {dir2_sf_entry}")
-                # if self._contains_control_chars_bytes(dir2_sf_entry.name, include_null=True):
-                #     return None
-                # dir2_sf_entry.name.decode("utf-8")  # Check if the name can be decoded
                 if (
                     # xfs_structs.XFS_DIR3_FT_REG_FILE <= dir2_sf_entry.ftype <= xfs_structs.XFS_DIR3_FT_SYMLINK
                     xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_sf_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT
@@ -394,7 +390,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 namelen += 1
                 if namelen > 255:
                     break
-            except (StreamError, UnicodeDecodeError) as err:
+            except StreamError as err:
                 self.dbg_print(f"_brute_force_xfs_dir2_sf_entry exception: {err}")
                 self.dbg_print(f"_brute_force_xfs_dir2_sf_entry exception: {data}")
                 return None
@@ -428,7 +424,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 self.dbg_print(f"_parse_directory_entries_shortform idx: {idx}")
                 dir2_sf_entry = self.xfs_dir2_sf_entry.parse(data[idx:dsize])
                 self.dbg_print(f"_parse_directory_entries_shortform dir2_sf_entry: {dir2_sf_entry}")
-                # dir2_sf_entry.name.decode("utf-8")  # Check if the name can be decoded
                 if (
                     dir2_sf_entry.namelen == 0
                     # or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
@@ -446,7 +441,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 idx += 0x1 + 0x2 + dir2_sf_entry.namelen + 0x1 + inumber_len  # xfs_dir2_sf_entry.offset is not used in short form
                 # If control code is included in dir2_sf_entry.name, it may not be appended.
                 dir_entries.append(dir2_sf_entry)
-            except (StreamError, UnicodeDecodeError) as err:
+            except StreamError as err:
                 self.dbg_print(f"_parse_directory_entries_shortform exception: {err}")
                 self.dbg_print(f"_parse_directory_entries_shortform exception: {data[idx:]}")
                 idx += 1
@@ -490,10 +485,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
     def _parse_inode_update(
         self,
         log_ops: list[XfsLogOperation],
-    ) -> tuple[Container | None, list[Container], list[ExtendedAttribute], str, DeviceNumber, int]:
+    ) -> tuple[int, Container | None, list[Container] | None, list[ExtendedAttribute], str, DeviceNumber, int]:
         idx = 1  # Processing from the second log operation
         inode = None
-        dir_entries: list[Container] = []
+        dir_entries: list[Container] | None = None
         eattrs: list[ExtendedAttribute] = []
         symlink_target = ""
         device_number = DeviceNumber()
@@ -504,7 +499,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             inode_log_format_64 = self.xfs_inode_log_format_64.parse(log_ops[0].item_data)
             self.dbg_print(f"_parse_inode_update inode_log_format_64: {inode_log_format_64}")
         except StreamError:
-            return inode, dir_entries, eattrs, symlink_target, device_number, parent_inode
+            return 0, inode, dir_entries, eattrs, symlink_target, device_number, parent_inode
 
         old_idx = 0
         while len(log_ops) >= inode_log_format_64.ilf_size and idx < inode_log_format_64.ilf_size:
@@ -581,7 +576,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ABROOT:
                 idx += 1
 
-        return inode, dir_entries, eattrs, symlink_target, device_number, parent_inode
+        return inode_log_format_64.ilf_blkno, inode, dir_entries, eattrs, symlink_target, device_number, parent_inode
 
     def _brute_force_xfs_dir2_data_entry(self, data: bytes) -> Container | None:
         namelen = 1
@@ -635,7 +630,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         except StreamError:
             pass
 
-    def _parse_buffer_writes(self, log_ops: list[XfsLogOperation]) -> Generator[tuple[int, Container | None], None, None]:
+    def _parse_buffer_writes(self, log_ops: list[XfsLogOperation]) -> Generator[tuple[int, int, Container | None], None, None]:
         try:
             # The first log operation is like a header for subsequent log operations.
             self.dbg_print(f"_parse_buffer_writes log_ops: {log_ops}")
@@ -665,7 +660,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 dir3_data_hdr.hdr.magic in (0x58444233, 0x58444433) and blf_flags & XfsBlft.XFS_BLFT_DIR_BLOCK_BUF
             ):  # XDB3 = 0x58444233, XDD3 = 0x58444433
                 for dir_entry in self._parse_block_directoreis(tmp_data[xfs_dir3_data_hdr.sizeof() :]):
-                    yield dir3_data_hdr.hdr.owner, dir_entry
+                    yield buf_log_format.blf_blkno, dir3_data_hdr.hdr.owner, dir_entry
             elif dir3_data_hdr.hdr.magic == 0x58534C4D:  # XSLM = 0x58534c4d
                 # XFS Algorithms & Data Structures, chapter 22.2 Extent Symbolic Links
                 print("Found a log operation which XSLM magic number. Need to implement a parser for extent symbolic links.", file=sys.stderr)
@@ -709,8 +704,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 tmp_log_ops[-1].op_header.oh_flags & xfs_structs.XLOG_CONTINUE_TRANS
                 and log_ops[0].op_header.oh_flags & xfs_structs.XLOG_WAS_CONT_TRANS
             ):
+                tmp_data = tmp_log_ops[-1].item_data
                 while idx < len(log_ops):
-                    tmp_data = tmp_log_ops[-1].item_data + log_ops[idx].item_data
+                    tmp_data += log_ops[idx].item_data
                     if log_ops[idx].op_header.oh_flags & xfs_structs.XLOG_END_TRANS:
                         break
                     idx += 1
@@ -827,35 +823,47 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                                             op_size = log_item.size
                                             result, processing_log_ops = self._retrieve_log_ops(log_item, log_ops[idx : idx + op_size])
                                             if result:
-                                                inode, dir_entries, eattrs, symlink_target, device_number, parent_inode = self._parse_inode_update(
-                                                    processing_log_ops,
+                                                block_num, inode, dir_entries, eattrs, symlink_target, device_number, parent_inode = (
+                                                    self._parse_inode_update(
+                                                        processing_log_ops,
+                                                    )
                                                 )
                                                 if inode:
-                                                    self.transactions[transaction_id].set_inode_info(inode.di_ino, inode, eattrs)
+                                                    self.transactions[transaction_id].set_inode_info(block_num, inode.di_ino, inode, eattrs)
                                                     self.transactions[transaction_id].entries[inode.di_ino].symlink_target = symlink_target
                                                     self.transactions[transaction_id].entries[inode.di_ino].device_number = device_number
                                                     dir_inode = inode.di_ino
                                                     if dir_entries:
                                                         for dir_entry in dir_entries:
-                                                            transaction.set_dent_info(dir_inode, parent_inode, dir_entry.inumber, dir_entry)
-                                                    # If dir_entries is empty, it means the last directory entry is deleted. Only "." and ".." are left.
+                                                            transaction.set_dent_info(
+                                                                block_num,
+                                                                dir_inode,
+                                                                parent_inode,
+                                                                dir_entry.inumber,
+                                                                dir_entry,
+                                                            )
+                                                    # If dir_entries is "[]", it means the last directory entry was deleted. Only "." and ".." are left.
+                                                    # If dir_entries is "None", it means the log operations don't contain directory entries (inode_log_format_64.ilf_fields does not have xfs_structs.XFS_ILOG_DDATA flag).
                                                     elif self.transactions[transaction_id].entries[inode.di_ino].file_type == FileTypes.DIRECTORY:
-                                                        transaction.set_dent_info(dir_inode, parent_inode, 0, None)
+                                                        if dir_entries == []:
+                                                            transaction.set_dent_info(block_num, dir_inode, parent_inode, 0, [])
+                                                        elif dir_entries is None:
+                                                            transaction.set_dent_info(block_num, dir_inode, parent_inode, 0, None)
                                         case xfs_structs.XFS_LI_BUF:  # 0x123C
                                             op_size = log_item.size
                                             result, processing_log_ops = self._retrieve_log_ops(log_item, log_ops[idx : idx + op_size])
                                             if result:
                                                 parent_inode = 0
                                                 self.dbg_print("Directory entry:")
-                                                for dir_inode, dir_entry in self._parse_buffer_writes(processing_log_ops):
+                                                for block_num, dir_inode, dir_entry in self._parse_buffer_writes(processing_log_ops):
                                                     if dir_entry.name == b".":
                                                         continue
                                                     if dir_entry.name == b"..":
                                                         parent_inode = dir_entry.inumber
                                                         continue
-                                                    transaction.set_dent_info(dir_inode, parent_inode, dir_entry.inumber, dir_entry)
+                                                    transaction.set_dent_info(block_num, dir_inode, parent_inode, dir_entry.inumber, dir_entry)
                                         case xfs_structs.XFS_LI_ICREATE:  # 0x123F
-                                            # TODO: Implement parsing inode creation, but I have never seen this log item in journals.
+                                            # Implement parsing inode creation, but I have never seen this log item in journals.
                                             transaction.trans_state = TransState.INODE_CREATION
                                         case 0x4946:  # "IF" of "FIB3"
                                             if log_item.size == 0x3342:  # "3B" of "FIB3"
@@ -888,7 +896,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
         dtime_f = float(0)
 
-        self._build_names_from_entries(working_entry, transaction_entry, transaction.dents)
+        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
         # Delete inode
         # The deletion time of XFS inodes is the same as ctime.
@@ -1084,9 +1092,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
 
             # Update working_entry with transaction_entry
             for field, _, new_value in differences:
-                if field not in ("associated_dirs", "names"):
+                if field not in ("names",):
                     setattr(working_entry, field, new_value)
-            working_entry.associated_dirs = copy.deepcopy(transaction_entry.associated_dirs)
             working_entry.names = copy.deepcopy(transaction_entry.names)
 
         if action != Actions.UNKNOWN:
@@ -1120,6 +1127,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         timeline_events: list[TimelineEventInfo] = []
         for tid in sorted(self.transactions):
             transaction = self.transactions[tid]
+            self.update_directory_entries(transaction)
+
             for inode_num in transaction.entries:
                 # Skip special inodes except the root inode
                 # The root inode number is 128 and it is hanled as a normal inode here.
@@ -1137,7 +1146,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                     crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
                     dtime_f = float(0)
 
-                    self._build_names_from_entries(working_entries[inode_num], transaction_entry, transaction.dents)
+                    transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
                     # Create inode
                     # - Creation of files in a directory updates the directory's ctime and mtime,
@@ -1159,24 +1168,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                         action |= Actions.CREATE_HARDLINK
                         if transaction_entry.link_count > 0:
                             info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
-
-                    # Delete inode
-                    # The deletion time of XFS inodes is the same as ctime.
-                    # if (
-                    #     transaction_entry.file_type == FileTypes.UNKNOWN
-                    #     and transaction_entry.mode == 0
-                    #     and transaction_entry.size == 0
-                    #     and transaction_entry.link_count == 0
-                    # ):
-                    #     action |= Actions.DELETE_INODE
-                    #     msg = self.format_timestamp(
-                    #         transaction_entry.ctime,
-                    #         transaction_entry.ctime_nanoseconds,
-                    #         label="Dtime",
-                    #         follow=False,
-                    #     )
-                    #     info = self._append_msg(info, msg)
-                    #     dtime_f = ctime_f
 
                     # Timestomp atime
                     if atime_f < crtime_f:
@@ -1228,7 +1219,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             info = self._append_msg(info, "Preallocated", " ")
 
                     # Update working_entry with transaction_entry
-                    working_entries[inode_num].associated_dirs = copy.deepcopy(transaction_entry.associated_dirs)
                     working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
 
                     if action != Actions.UNKNOWN:
@@ -1260,10 +1250,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
                 # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
                 if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
-                    tmp_associated_dirs = copy.deepcopy(transaction.entries[inode_num].associated_dirs)
                     tmp_entryinfo_source = copy.deepcopy(transaction.entries[inode_num].entryinfo_source)
                     transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
-                    transaction.entries[inode_num].associated_dirs = tmp_associated_dirs
                     transaction.entries[inode_num].entryinfo_source = tmp_entryinfo_source | EntryInfoSource.WORKING_ENTRY
 
                 # Generate timeline event for each inode

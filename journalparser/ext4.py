@@ -117,7 +117,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry.mtime, entry.mtime_nanoseconds = cls._calc_extra_time(inode.i_mtime, inode.i_mtime_extra)
         entry.crtime, entry.crtime_nanoseconds = cls._calc_extra_time(inode.i_crtime, inode.i_crtime_extra)
 
-    def set_inode_info(self, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
+    def set_inode_info(self, block_num: int, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
         special_inodes = {
             0: "Doesn't exist",
             1: "List of defective blocks",
@@ -138,12 +138,12 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry = self.entries[inode_num]
         entry.inode = inode_num
         if special_inodes.get(inode_num):
-            if 2 not in entry.associated_dirs:
-                entry.associated_dirs.append(2)
             entry.names.update({2: [special_inodes[inode_num]]})
-            if not self.dents.get(2):
-                self.dents[2] = DentInfo(dir_inode=2, parent_inode=2)
-            self.dents[2].entries[inode_num] = [special_inodes[inode_num]]
+            if not self.dents2.get(2):
+                self.dents2[2] = DentInfo(dir_inode=2, parent_inode=2)
+            if not self.dents2[2].block_entries.get(block_num):
+                self.dents2[2].block_entries[block_num] = {}
+            self.dents2[2].block_entries[block_num].update({inode_num: [special_inodes[inode_num]]})
 
         match inode.i_mode & 0xF000:
             case ext4_structs.EXT4_FT_UNKNOWN:
@@ -171,7 +171,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry.uid = inode.i_osd2.l_i_uid_high << 16 | inode.i_uid
         entry.gid = inode.i_osd2.l_i_gid_high << 16 | inode.i_gid
         entry.size = inode.i_size_high << 32 | inode.i_size_lo
-        self._adjust_time(entry, inode)  # MACB time
+        self._adjust_time(entry, inode)  # Calculate MACB time
         entry.dtime = inode.i_dtime
         entry.dtime_nanoseconds = 0
         entry.flags = inode.i_flags
@@ -185,29 +185,36 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
             entry.device_number = DeviceNumber(major, minor)
         entry.entryinfo_source |= EntryInfoSource.INODE
 
-    def set_dent_info(self, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | None) -> None:
+    def set_dent_info(self, block_num: int, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | list | None) -> None:
         # Set DentInfo (directory entry information)
-        if not self.dents.get(dir_inode_num):
-            self.dents[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
-        dent = self.dents[dir_inode_num]
+        if dir_entry is not None:
+            if not self.dents2.get(dir_inode_num):
+                self.dents2[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
+            if not self.dents2[dir_inode_num].block_entries.get(block_num):
+                self.dents2[dir_inode_num].block_entries[block_num] = {}
+            dent = self.dents2[dir_inode_num].block_entries[block_num]
+            # Add EntryInfoSource.DIR_ENTRY to entries[dir_inode_num]
+            # This setting is required to mark directory entries recognized in the current transaction
+            # so they can be merged with entries from previous transactions.
+            if not self.entries.get(dir_inode_num):
+                self.entries[dir_inode_num] = EntryInfoExt4(inode=dir_inode_num)
+            self.entries[dir_inode_num].entryinfo_source |= EntryInfoSource.DIR_ENTRY
+
         if dir_entry:
             try:
                 name = dir_entry.name.decode("utf-8")
-                if name not in dent.entries.get(inode_num, []):
-                    if not dent.entries.get(inode_num):
-                        dent.entries[inode_num] = []
-                    dent.entries[inode_num].append(name)
+                if not dent.get(inode_num):
+                    dent[inode_num] = []
+                if name not in dent[inode_num]:
+                    dent[inode_num].append(name)
             except UnicodeDecodeError:
-                pass
+                print(f"set_dent_info UnicodeDecodeError: {dir_entry}", file=sys.stderr)
 
         # Set EntryInfo (file entry information)
         if dir_entry:
             if not self.entries.get(inode_num):
                 self.entries[inode_num] = EntryInfoExt4(inode=inode_num)
             entry = self.entries[inode_num]
-
-            if dir_inode_num not in entry.associated_dirs:
-                entry.associated_dirs.append(dir_inode_num)
 
             # Set file type from directory entry
             match dir_entry.file_type:
@@ -286,11 +293,13 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             inode_tables.append(BgInodeTable(inode_table_head, inode_table_len))
         self.inode_tables = inode_tables
 
-    def _check_inode_table_range(self, t_blocknr: int) -> BgInodeTable | None:
+    def _check_inode_table_range(self, t_blocknr: int) -> tuple[int, BgInodeTable | None]:
+        inode_table_num = 0
         for inode_table in self.inode_tables:
             if inode_table.head <= t_blocknr < inode_table.head + inode_table.len:
-                return inode_table
-        return None
+                return inode_table_num, inode_table
+            inode_table_num += 1
+        return inode_table_num, None
 
     def _read_journal_block(self, block_num: int) -> bytes:
         journal_sb = self.journal_superblock
@@ -395,15 +404,16 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     def _parse_inode_table(
         self,
         t_blocknr: int,
+        inode_table_num: int,
         inode_table: BgInodeTable,
         data: bytes,
     ) -> Generator[tuple[int, Container, list[ExtendedAttribute]], None, None]:
-        itable_head = inode_table.head
-        itable_len = inode_table.len
         eattrs = []
-        if itable_head <= t_blocknr < itable_head + itable_len:
+        if inode_table.head <= t_blocknr < inode_table.head + inode_table.len:
             idx = 0
-            first_inode_in_table = (t_blocknr % itable_head) * (len(data) // self.s_inode_size) + 1
+            first_inode_num_in_table_block = (
+                (inode_table_num * self.ext4_superblock.s_inodes_per_group) + ((t_blocknr % inode_table.head) * (len(data) // self.s_inode_size)) + 1
+            )
             while idx < len(data):
                 inode_data = data[idx : idx + self.s_inode_size]
                 # Empty inode (b"\00" * s_inode_size) is not a valid inode. So, it can be ignored probably.
@@ -412,13 +422,15 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     if inode.i_mode & 0xF000 < ext4_structs.S_IFIFO or inode.i_mode & 0xF000 > ext4_structs.S_IFSOCK:
                         idx += self.s_inode_size
                         continue
-                    inode_num = first_inode_in_table + (idx // self.s_inode_size)
+                    inode_num = first_inode_num_in_table_block + (idx // self.s_inode_size)
                     eattrs = self._parse_ea_in_inode(data[idx + 128 + inode.i_extra_isize : idx + self.s_inode_size])
                     yield inode_num, inode, eattrs
                 idx += self.s_inode_size
 
-    def _parse_linear_directory(self, data: bytes) -> Generator[Container, None, None]:
+    def _parse_linear_directory(self, data: bytes) -> list[Container] | None:
         idx = 0
+        dir_entries: list[Container] | None = []
+
         while idx < len(data) - ext4_dir_entry_tail.sizeof():
             dir_entry = ext4_dir_entry_2.parse(data[idx : idx + self.s_inode_size])
             if dir_entry.rec_len == 0:  # rec_len must not be zero
@@ -426,9 +438,11 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             idx += dir_entry.rec_len
             if dir_entry.inode == 0 or dir_entry.name_len == 0 or dir_entry.file_type == ext4_structs.EXT4_FT_UNKNOWN:  # Skip an invalid entry
                 continue
-            yield dir_entry
+            dir_entries.append(dir_entry)
 
-    def _parse_directory_entries(self, data: bytes) -> Generator[Container | None, None, None]:
+        return dir_entries
+
+    def _parse_directory_entries(self, data: bytes) -> list[Container] | None:
         try:
             as_dx_root = dx_root.parse(data)
             if (
@@ -445,19 +459,21 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 and as_dx_root.dx_root_info.info_length == 8
                 and as_dx_root.dx_root_info.indirect_levels in range(4)
             ):
-                yield as_dx_root.dot
-                yield as_dx_root.dotdot
-            elif (
+                return [as_dx_root.dot, as_dx_root.dotdot]
+            if (
                 as_dx_root.dot.inode == 0 and as_dx_root.dot.rec_len == 0 and as_dx_root.dot.name_len == 0 and as_dx_root.dot.file_type == 0
             ):  # This data block must be a dx_node.
                 pass
             else:
-                yield from self._parse_linear_directory(data)
+                # yield from self._parse_linear_directory(data)
+                return self._parse_linear_directory(data)
         except (StreamError, RangeError):
             try:
-                yield from self._parse_linear_directory(data)
+                # yield from self._parse_linear_directory(data)
+                return self._parse_linear_directory(data)
             except StreamError:
-                yield None
+                # yield None
+                return None
 
     def parse_journal(self) -> None:
         self._parse_ext4_superblock()
@@ -496,12 +512,13 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                 data_block = self._read_journal_block(block_num)
                                 # If block_num is a part of inode table, parse it as inode list.
                                 # If not, parse it as external extended attributes or ext4_dir_entry_2 entries.
-                                if inode_table := self._check_inode_table_range(t_blocknr):
-                                    for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table, data_block):
+                                inode_table_num, inode_table = self._check_inode_table_range(t_blocknr)
+                                if inode_table:
+                                    for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table_num, inode_table, data_block):
                                         self.dbg_print(f"Inode number: {inode_num}")
                                         self.dbg_print(f"Inode: {inode}")
                                         self.dbg_print(f"Extended attributes: {eattrs}")
-                                        self.transactions[transaction_id].set_inode_info(inode_num, inode, eattrs)
+                                        self.transactions[transaction_id].set_inode_info(t_blocknr, inode_num, inode, eattrs)
                                 else:
                                     try:
                                         symlink_target = data_block.decode("utf-8").rstrip("\x00")
@@ -524,16 +541,22 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                                 dir_inode = 0
                                                 parent_inode = 0
                                                 self.dbg_print("Directory entry:")
-                                                for dir_entry in self._parse_directory_entries(data_block):
-                                                    if dir_entry:
-                                                        self.dbg_print(dir_entry)
-                                                        if dir_entry.name.decode("utf-8") == ".":
-                                                            dir_inode = dir_entry.inode
-                                                            continue
-                                                        if dir_entry.name.decode("utf-8") == "..":
-                                                            parent_inode = dir_entry.inode
-                                                            continue
-                                                        transaction.set_dent_info(dir_inode, parent_inode, dir_entry.inode, dir_entry)
+                                                dir_entries = self._parse_directory_entries(data_block)
+                                                if dir_entries:
+                                                    for dir_entry in dir_entries:
+                                                        if dir_entry:
+                                                            self.dbg_print(dir_entry)
+                                                            if dir_entry.name.decode("utf-8").rstrip("\x00") == ".":
+                                                                dir_inode = dir_entry.inode
+                                                                continue
+                                                            if dir_entry.name.decode("utf-8").rstrip("\x00") == "..":
+                                                                parent_inode = dir_entry.inode
+                                                                continue
+                                                        transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, dir_entry.inode, dir_entry)
+                                                elif dir_entries == []:
+                                                    transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, [])
+                                                elif dir_entries == None:  # StreamError exception happened in _parse_directory_entries()?
+                                                    transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, None)
                                             except UnicodeDecodeError:
                                                 pass
 
@@ -584,7 +607,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         commit_time_nanoseconds = self.transactions[tid].commit_time_nanoseconds
         commit_time_f = float(f"{commit_time}.{commit_time_nanoseconds:09d}")
 
-        self._build_names_from_entries(working_entry, transaction_entry, transaction.dents)
+        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
         # Delete inode
         # The ext4 inodes have a dtime field but ctime (or mtime) is more reliable for deletion detection. Because the ext4 inodes do not have a nanosecond field for dtime.
@@ -780,9 +803,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
             # Update working_entry with transaction_entry
             for field, _, new_value in differences:
-                if field not in ("associated_dirs", "names"):
+                if field not in ("names",):
                     setattr(working_entry, field, new_value)
-            working_entry.associated_dirs = copy.deepcopy(transaction_entry.associated_dirs)
             working_entry.names = copy.deepcopy(transaction_entry.names)
 
         if action != Actions.UNKNOWN:
@@ -817,6 +839,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         for tid in sorted(self.transactions):
             transaction = self.transactions[tid]
             commit_time_f = float(f"{transaction.commit_time}.{transaction.commit_time_nanoseconds:09d}")
+            self.update_directory_entries(transaction)
+
             for inode_num in transaction.entries:
                 # Skip special inodes except the root inode
                 # The root inode number is 2 and it is hanled as a normal inode here.
@@ -834,7 +858,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
                     dtime_f = float(f"{transaction_entry.dtime}.{transaction_entry.dtime_nanoseconds:09d}")
 
-                    self._build_names_from_entries(working_entries[inode_num], transaction_entry, transaction.dents)
+                    transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
                     # Create inode
                     # - Creation of files in a directory updates the directory's ctime and mtime,
@@ -856,24 +880,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         action |= Actions.CREATE_HARDLINK
                         if transaction_entry.link_count > 0:
                             info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
-
-                    # Delete inode
-                    # The deletion time of XFS inodes is the same as ctime.
-                    # if transaction_entry.dtime != 0:
-                    #     if transaction_entry.dtime == transaction_entry.ctime:
-                    #         dtime = transaction_entry.ctime
-                    #         dtime_nanoseconds = transaction_entry.ctime_nanoseconds
-                    #     else:
-                    #         dtime = transaction_entry.dtime
-                    #         dtime_nanoseconds = transaction_entry.dtime_nanoseconds
-                    #     action |= Actions.DELETE_INODE
-                    #     msg = self.format_timestamp(
-                    #         dtime,
-                    #         dtime_nanoseconds,
-                    #         label="Dtime",
-                    #         follow=False,
-                    #     )
-                    #     info = self._append_msg(info, msg)
 
                     # Timestomp atime
                     if atime_f < crtime_f:
@@ -957,7 +963,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         transaction_entry.symlink_target = symlink_target
 
                     # Update working_entry with transaction_entry
-                    working_entries[inode_num].associated_dirs = copy.deepcopy(transaction_entry.associated_dirs)
                     working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
 
                     if action != Actions.UNKNOWN:
@@ -989,8 +994,9 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
                 # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
                 if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
+                    tmp_entryinfo_source = copy.deepcopy(transaction.entries[inode_num].entryinfo_source)
                     transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
-                    transaction.entries[inode_num].entryinfo_source |= EntryInfoSource.WORKING_ENTRY
+                    transaction.entries[inode_num].entryinfo_source = tmp_entryinfo_source | EntryInfoSource.WORKING_ENTRY
 
                 # Copy symlink target to current entry
                 if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):

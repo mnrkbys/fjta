@@ -139,11 +139,11 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry.inode = inode_num
         if special_inodes.get(inode_num):
             entry.names.update({2: [special_inodes[inode_num]]})
-            if not self.dents2.get(2):
-                self.dents2[2] = DentInfo(dir_inode=2, parent_inode=2)
-            if not self.dents2[2].block_entries.get(block_num):
-                self.dents2[2].block_entries[block_num] = {}
-            self.dents2[2].block_entries[block_num].update({inode_num: [special_inodes[inode_num]]})
+            if not self.dents.get(2):
+                self.dents[2] = DentInfo(dir_inode=2, parent_inode=2)
+            if not self.dents[2].block_entries.get(block_num):
+                self.dents[2].block_entries[block_num] = {}
+            self.dents[2].block_entries[block_num].update({inode_num: [special_inodes[inode_num]]})
 
         match inode.i_mode & 0xF000:
             case ext4_structs.EXT4_FT_UNKNOWN:
@@ -188,11 +188,11 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
     def set_dent_info(self, block_num: int, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | list | None) -> None:
         # Set DentInfo (directory entry information)
         if dir_entry is not None:
-            if not self.dents2.get(dir_inode_num):
-                self.dents2[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
-            if not self.dents2[dir_inode_num].block_entries.get(block_num):
-                self.dents2[dir_inode_num].block_entries[block_num] = {}
-            dent = self.dents2[dir_inode_num].block_entries[block_num]
+            if not self.dents.get(dir_inode_num):
+                self.dents[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
+            if not self.dents[dir_inode_num].block_entries.get(block_num):
+                self.dents[dir_inode_num].block_entries[block_num] = {}
+            dent = self.dents[dir_inode_num].block_entries[block_num]
             # Add EntryInfoSource.DIR_ENTRY to entries[dir_inode_num]
             # This setting is required to mark directory entries recognized in the current transaction
             # so they can be merged with entries from previous transactions.
@@ -596,6 +596,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         timeline_event = None
         action = Actions.UNKNOWN
         msg = info = ""
+        reuse_inode = False
 
         atime_f = float(f"{transaction_entry.atime}.{transaction_entry.atime_nanoseconds:09d}")
         ctime_f = float(f"{transaction_entry.ctime}.{transaction_entry.ctime_nanoseconds:09d}")
@@ -606,8 +607,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         commit_time = self.transactions[tid].commit_time
         commit_time_nanoseconds = self.transactions[tid].commit_time_nanoseconds
         commit_time_f = float(f"{commit_time}.{commit_time_nanoseconds:09d}")
-
-        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
         # Delete inode
         # The ext4 inodes have a dtime field but ctime (or mtime) is more reliable for deletion detection. Because the ext4 inodes do not have a nanosecond field for dtime.
@@ -627,14 +626,19 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             )
             info = self._append_msg(info, msg)
             dtime_f = ctime_f
+            self.remove_directory_entries(inode_num)
 
-        # Delete hard link
-        if working_entry.link_count > transaction_entry.link_count:
-            action |= Actions.DELETE_HARDLINK
-            info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
-            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
+        differences = self._compare_entry_fields(working_entry, transaction_entry)
 
-        if not (action & Actions.DELETE_INODE) and (differences := self._compare_entry_fields(working_entry, transaction_entry)):
+        # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
+        if any(field == "file_type" for field, *_ in differences):
+            reuse_inode = True
+            self.remove_directory_entries(inode_num)
+            self.update_directory_entries(transaction)
+
+        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
+
+        if not (action & Actions.DELETE_INODE) and differences:
             for field, current_value, new_value in differences:
                 match field:
                     case "crtime":  # Reuse inode or timestomping
@@ -682,6 +686,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             msg += " (Timestomp: commit_time < crtime)"
                         info = self._append_msg(info, msg)
                     case "atime":
+                        if reuse_inode:
+                            continue
                         action |= Actions.ACCESS
                         current_atime = current_value
                         current_atime_nanoseconds = working_entry.atime_nanoseconds
@@ -702,6 +708,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             msg += " (Timestomp: commit_time < atime)"
                         info = self._append_msg(info, msg)
                     case "ctime":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE
                         current_ctime = current_value
                         current_ctime_nanoseconds = working_entry.ctime_nanoseconds
@@ -722,6 +730,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             msg += " (Timestomp: commit_time < ctime)"
                         info = self._append_msg(info, msg)
                     case "mtime":
+                        if reuse_inode:
+                            continue
                         action |= Actions.MODIFY
                         current_mtime = current_value
                         current_mtime_nanoseconds = working_entry.mtime_nanoseconds
@@ -742,27 +752,37 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             msg += " (Timestomp: commit_time < mtime)"
                         info = self._append_msg(info, msg)
                     case "mode":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_MODE
                         info = self._append_msg(info, f"Mode: {current_value:04o} -> {new_value:04o}")
                     case "uid":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_UID
                         info = self._append_msg(info, f"UID: {current_value} -> {new_value}")
                         if new_value & ext4_structs.S_ISUID:
                             action |= Actions.SETUID
                             info += " (SetUID)"
                     case "gid":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_GID
                         info = self._append_msg(info, f"GID: {current_value} -> {new_value}")
                         if new_value & ext4_structs.S_ISGID:
                             action |= Actions.SETGID
                             info += " (SetGID)"
                     case "size":
+                        if reuse_inode:
+                            continue
                         if current_value < new_value:
                             action |= Actions.SIZE_UP
                         else:
                             action |= Actions.SIZE_DOWN
                         info = self._append_msg(info, f"Size: {current_value} -> {new_value}")
                     case "link_count":
+                        if reuse_inode:
+                            continue
                         if working_entry.link_count < transaction_entry.link_count:
                             action |= Actions.CREATE_HARDLINK
                             info = self._append_msg(
@@ -776,6 +796,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                                 f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
                             )
                     case "flags":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_FLAGS
                         info = self._append_msg(info, f"Flags: 0x{current_value:x} -> 0x{new_value:x}")
                         if new_value & ext4_structs.EXT4_IMMUTABLE_FL:
@@ -783,9 +805,13 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         elif new_value & ext4_structs.EXT4_NOATIME_FL:
                             info = self._append_msg(info, "NoAtime", " ")
                     case "symlink_target":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_SYMLINK_TARGET
                         info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")
                     case "extended_attributes":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_EA
                         added_ea, removed_ea = self._compare_extended_attributes(current_value, new_value)
                         if added_ea:
@@ -795,6 +821,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             removed_ea_str = ", ".join(f"{ea}" for ea in removed_ea)
                             info = self._append_msg(info, f"Removed EA: {removed_ea_str}")
                     case "names":
+                        if reuse_inode:
+                            continue
                         if working_entry.link_count == transaction_entry.link_count and working_entry.names != transaction_entry.names:
                             action |= Actions.MOVE
                             info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
@@ -806,6 +834,12 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 if field not in ("names",):
                     setattr(working_entry, field, new_value)
             working_entry.names = copy.deepcopy(transaction_entry.names)
+
+        # Delete hard link
+        if not reuse_inode and working_entry.link_count > transaction_entry.link_count:
+            action |= Actions.DELETE_HARDLINK
+            # info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
+            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
 
         if action != Actions.UNKNOWN:
             timeline_event = TimelineEventInfo(

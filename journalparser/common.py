@@ -142,7 +142,7 @@ class EntryInfo:
 class JournalTransaction[T: EntryInfo]:
     tid: int  # transaction id
     entries: dict[int, T] = field(default_factory=dict)  # dict[inode_num, EntryInfo]
-    dents2: dict[int, DentInfo] = field(default_factory=dict)  # dict[dir_inode, DentInfo]
+    dents: dict[int, DentInfo] = field(default_factory=dict)  # dict[dir_inode, DentInfo]
 
     def set_inode_info(self, block_num: int, inode_num: int, inode: Container, eattrs: list[ExtendedAttribute]) -> None:
         msg = "Subclasses must implement set_inode_info."
@@ -158,8 +158,8 @@ class JournalTransaction[T: EntryInfo]:
 
     def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
         names: dict[int, list[str]] = {}
-        for dir_inode, dents in self.dents2.items():
-            if tmp_names := dents.find_names_by_inodenum(inode_num):
+        for dir_inode, dir_entries in self.dents.items():
+            if tmp_names := dir_entries.find_names_by_inodenum(inode_num):
                 names.update({dir_inode: tmp_names})
         return names
 
@@ -299,25 +299,27 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         return msg
 
     def update_directory_entries(self, transaction: T) -> None:
-        for dir_inode, dents in transaction.dents2.items():
+        for dir_inode, dir_entries in transaction.dents.items():
             if not self.working_dents.get(dir_inode):
-                self.working_dents[dir_inode] = copy.deepcopy(dents)
+                self.working_dents[dir_inode] = copy.deepcopy(dir_entries)
             elif transaction.entries.get(dir_inode) and transaction.entries[dir_inode].entryinfo_source & EntryInfoSource.DIR_ENTRY:
-                # for block_num in self.working_dents[dir_inode].block_entries:
-                #     if dents.block_entries.get(block_num) is None:
-                #         continue
-                #     if not self.working_dents[dir_inode].block_entries.get(block_num):
-                #         self.working_dents[dir_inode].block_entries[block_num] = {}
-                #     self.working_dents[dir_inode].block_entries[block_num] = copy.deepcopy(dents.block_entries[block_num])
-                for block_num in dents.block_entries:
+                for block_num in dir_entries.block_entries:
                     if not self.working_dents[dir_inode].block_entries.get(block_num):
                         self.working_dents[dir_inode].block_entries[block_num] = {}
-                    self.working_dents[dir_inode].block_entries[block_num] = copy.deepcopy(dents.block_entries[block_num])
+                    self.working_dents[dir_inode].block_entries[block_num] = copy.deepcopy(dir_entries.block_entries[block_num])
+
+    def remove_directory_entries(self, inode_num: int) -> None:
+        for dir_inode, dir_entries in self.working_dents.items():
+            for block_num in list(dir_entries.block_entries):
+                if inode_num in dir_entries.block_entries.get(block_num, {}):
+                    self.working_dents[dir_inode].block_entries[block_num].pop(inode_num)
+                    if not self.working_dents[dir_inode].block_entries[block_num]:
+                        del self.working_dents[dir_inode].block_entries[block_num]
 
     def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
         names: dict[int, list[str]] = {}
-        for dir_inode, dents in self.working_dents.items():
-            if tmp_names := dents.find_names_by_inodenum(inode_num):
+        for dir_inode, dir_entries in self.working_dents.items():
+            if tmp_names := dir_entries.find_names_by_inodenum(inode_num):
                 names.update({dir_inode: tmp_names})
         return names
 

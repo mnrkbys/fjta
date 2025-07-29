@@ -129,11 +129,11 @@ class JournalTransactionXfs(JournalTransaction):
         entry.inode = inode_num
         if special_inodes.get(inode_num):
             entry.names.update({128: [special_inodes[inode_num]]})
-            if not self.dents2.get(128):
-                self.dents2[128] = DentInfo(dir_inode=128, parent_inode=128)
-            if not self.dents2[128].block_entries.get(block_num):
-                self.dents2[128].block_entries[block_num] = {}
-            self.dents2[128].block_entries[block_num].update({inode_num: [special_inodes[inode_num]]})
+            if not self.dents.get(128):
+                self.dents[128] = DentInfo(dir_inode=128, parent_inode=128)
+            if not self.dents[128].block_entries.get(block_num):
+                self.dents[128].block_entries[block_num] = {}
+            self.dents[128].block_entries[block_num].update({inode_num: [special_inodes[inode_num]]})
 
         match inode.di_mode & xfs_structs.S_IFMT:
             case xfs_structs.XFS_DIR3_FT_UNKNOWN:
@@ -181,11 +181,11 @@ class JournalTransactionXfs(JournalTransaction):
     def set_dent_info(self, block_num: int, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | list | None) -> None:
         # Set DentInfo
         if dir_entry is not None:
-            if not self.dents2.get(dir_inode_num):
-                self.dents2[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
-            if not self.dents2[dir_inode_num].block_entries.get(block_num):
-                self.dents2[dir_inode_num].block_entries[block_num] = {}
-            dent = self.dents2[dir_inode_num].block_entries[block_num]
+            if not self.dents.get(dir_inode_num):
+                self.dents[dir_inode_num] = DentInfo(dir_inode=dir_inode_num, parent_inode=parent_inode_num)
+            if not self.dents[dir_inode_num].block_entries.get(block_num):
+                self.dents[dir_inode_num].block_entries[block_num] = {}
+            dent = self.dents[dir_inode_num].block_entries[block_num]
             # Add EntryInfoSource.DIR_ENTRY to entries[dir_inode_num]
             # This setting is required to mark directory entries recognized in the current transaction
             # so they can be merged with entries from previous transactions.
@@ -889,14 +889,13 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         timeline_event = None
         action = Actions.UNKNOWN
         msg = info = ""
+        reuse_inode = False
 
         atime_f = float(f"{transaction_entry.atime}.{transaction_entry.atime_nanoseconds:09d}")
         ctime_f = float(f"{transaction_entry.ctime}.{transaction_entry.ctime_nanoseconds:09d}")
         mtime_f = float(f"{transaction_entry.mtime}.{transaction_entry.mtime_nanoseconds:09d}")
         crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
         dtime_f = float(0)
-
-        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
         # Delete inode
         # The deletion time of XFS inodes is the same as ctime.
@@ -915,14 +914,19 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             )
             info = self._append_msg(info, msg)
             dtime_f = ctime_f
+            self.remove_directory_entries(inode_num)
 
-        # Delete hard link
-        if working_entry.link_count > transaction_entry.link_count:
-            action |= Actions.DELETE_HARDLINK
-            info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
-            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
+        differences = self._compare_entry_fields(working_entry, transaction_entry)
 
-        if not (action & Actions.DELETE_INODE) and (differences := self._compare_entry_fields(working_entry, transaction_entry)):
+        # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
+        if any(field == "file_type" for field, *_ in differences):
+            reuse_inode = True
+            self.remove_directory_entries(inode_num)
+            self.update_directory_entries(transaction)
+
+        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
+
+        if not (action & Actions.DELETE_INODE) and differences:
             for field, current_value, new_value in differences:
                 match field:
                     case "crtime":  # Reuse inode or timestomping
@@ -960,6 +964,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             msg += " (Timestomp)"
                         info = self._append_msg(info, msg)
                     case "atime":
+                        if reuse_inode:
+                            continue
                         action |= Actions.ACCESS
                         current_atime = current_value
                         current_atime_nanoseconds = working_entry.atime_nanoseconds
@@ -983,6 +989,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             msg += " (Timestomp)"
                         info = self._append_msg(info, msg)
                     case "ctime":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE
                         current_ctime = current_value
                         current_ctime_nanoseconds = working_entry.ctime_nanoseconds
@@ -1006,6 +1014,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             msg += " (Timestomp)"
                         info = self._append_msg(info, msg)
                     case "mtime":
+                        if reuse_inode:
+                            continue
                         action |= Actions.MODIFY
                         current_mtime = current_value
                         current_mtime_nanoseconds = working_entry.mtime_nanoseconds
@@ -1029,27 +1039,37 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             msg += " (Timestomp)"
                         info = self._append_msg(info, msg)
                     case "mode":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_MODE
                         info = self._append_msg(info, f"Mode: {current_value:04o} -> {new_value:04o}")
                     case "uid":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_UID
                         info = self._append_msg(info, f"UID: {current_value} -> {new_value}")
                         if new_value & xfs_structs.S_ISUID:
                             action |= Actions.SETUID
                             info += " (SetUID)"
                     case "gid":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_GID
                         info = self._append_msg(info, f"GID: {current_value} -> {new_value}")
                         if new_value & xfs_structs.S_ISGID:
                             action |= Actions.SETGID
                             info += " (SetGID)"
                     case "size":
+                        if reuse_inode:
+                            continue
                         if current_value < new_value:
                             action |= Actions.SIZE_UP
                         else:
                             action |= Actions.SIZE_DOWN
                         info = self._append_msg(info, f"Size: {current_value} -> {new_value}")
                     case "link_count":
+                        if reuse_inode:
+                            continue
                         if working_entry.link_count < transaction_entry.link_count:
                             action |= Actions.CREATE_HARDLINK
                             info = self._append_msg(
@@ -1063,6 +1083,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                                 f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
                             )
                     case "flags":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_FLAGS
                         info = self._append_msg(info, f"Flags: 0x{current_value:x} -> 0x{new_value:x}")
                         if new_value & xfs_structs.XFS_DIFLAG_IMMUTABLE:
@@ -1072,9 +1094,13 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                         elif new_value & xfs_structs.XFS_DIFLAG_PREALLOC:
                             info = self._append_msg(info, "Preallocated", " ")
                     case "symlink_target":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_SYMLINK_TARGET
                         info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")
                     case "extended_attributes":
+                        if reuse_inode:
+                            continue
                         action |= Actions.CHANGE_EA
                         added_ea, removed_ea = self._compare_extended_attributes(current_value, new_value)
                         if added_ea:
@@ -1084,6 +1110,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                             removed_ea_str = ", ".join(f"{ea}" for ea in removed_ea)
                             info = self._append_msg(info, f"Removed EA: {removed_ea_str}")
                     case "names":
+                        if reuse_inode:
+                            continue
                         if working_entry.link_count == transaction_entry.link_count and working_entry.names != transaction_entry.names:
                             action |= Actions.MOVE
                             info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
@@ -1095,6 +1123,12 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 if field not in ("names",):
                     setattr(working_entry, field, new_value)
             working_entry.names = copy.deepcopy(transaction_entry.names)
+
+        # Delete hard link
+        if not reuse_inode and working_entry.link_count > transaction_entry.link_count:
+            action |= Actions.DELETE_HARDLINK
+            # info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
+            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
 
         if action != Actions.UNKNOWN:
             timeline_event = TimelineEventInfo(

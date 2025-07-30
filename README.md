@@ -78,8 +78,43 @@ git clone https://github.com/mnrkbys/fjta.git
 
 ## Usage
 
+### Basic
+
 ```bash
 python ./fjta.py -i ~/ext4.img | jq
+```
+
+### Filtering with a inode number
+
+```bash
+python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.inode == 101040435)' | less
+```
+
+### Filtering with crtime
+
+The to_epoch() function is defined in the helper.sh file, so you need to import it before executing the following command.
+
+```bash
+source scripts/helper.sh
+python ./fjta.py -s 0 -i ~/xfs.img | jq --argjson threshold $(to_epoch "2025-06-23 07:33:20.123456789") 'select(.crtime >= $threshold)'
+```
+
+### Filtering with a filename
+
+```bash
+python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.names? and ([.names[][]] | index("backdoor.c")))'
+```
+
+### Filtering with a string
+
+```bash
+python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | contains("Added EA: security.selinux"))'
+```
+
+### Filtering with a regex pattern
+
+```bash
+python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security\\.selinux"; "i"))'
 ```
 
 ## Sample Output
@@ -146,6 +181,11 @@ python ./fjta.py -i ~/ext4.img | jq
 }
 ...
 ```
+
+## Tested on
+
+- Ubuntu 24.10 with kernel 6.8.0-63
+- Rocky Linux 9.4 with kernel 5.14.0-427.31.1.el9_4.x86_64
 
 ## Contributing
 

@@ -58,13 +58,6 @@ class EntryInfoSource(Flag):
 
 
 @dataclass
-class NameInfo:
-    name: str = ""
-    dir_inode: int = 0
-    parent_inode: int = 0
-
-
-@dataclass
 class DeviceNumber:
     major: int = 0
     minor: int = 0

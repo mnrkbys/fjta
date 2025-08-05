@@ -22,6 +22,7 @@
 # https://righteousit.com/2024/09/04/more-on-ext4-timestamps-and-timestomping/
 
 import copy
+import io
 import json
 import math
 from argparse import Namespace
@@ -39,6 +40,7 @@ from journalparser.common import (
     EntryInfoSource,
     ExtendedAttribute,
     FileTypes,
+    FsTypes,
     JournalParserCommon,
     JournalTransaction,
     TimelineEventInfo,
@@ -243,8 +245,9 @@ class JournalDescriptorNotFoundError(Exception):
 
 
 class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt4]):
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, args: Namespace) -> None:
+    def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         super().__init__(img_info, fs_info, args)
+        self.fstype = FsTypes.EXT4
 
     def _create_transaction(self, tid: int) -> JournalTransactionExt4:
         return JournalTransactionExt4(tid)
@@ -253,6 +256,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         self.ext4_superblock = ext4_superblock_s.parse(self.img_info.read(self.offset + 0x400, ext4_superblock_s.sizeof()))
         if self.ext4_superblock.s_magic == 0xEF53:  # EXT4 superblock magic number is 0xEF53
             self.dbg_print(f"EXT4 superblock: {self.ext4_superblock}")
+            self.block_size = 2 ** (10 + self.ext4_superblock.s_log_block_size)
             self.s_inode_size = self.ext4_superblock.s_inode_size
         else:
             msg = f"Bad magic number in EXT4 superblock: 0x{self.ext4_superblock.s_magic:x}"
@@ -476,6 +480,9 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 return None
 
     def parse_journal(self) -> None:
+        journal_blocks: dict[int, int] = {}  # dict[h_sequence, block_num]
+        tmp_journal_blocks: dict[int, int] = {}  # dict[h_sequence, block_num]
+
         self._parse_ext4_superblock()
         self._parse_block_group_descriptors()
         self._retrieve_inode_tables()
@@ -487,102 +494,127 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             raise JournalDescriptorNotFoundError(msg)
         # block_num indicates the block number in journal data, not the block number of the file system
         block_num = first_desc_block
+
+        # Find all transactions in the journal and sort by h_sequence.
+        found_descriptor_block = False
         while block_num < first_desc_block + journal_sb.s_maxlen - journal_sb.s_first:
             try:
                 data = self._read_journal_block(block_num)
                 block_header = journal_header_s.parse(data)
                 self.dbg_print(f"Block header: {block_header}")
-                transaction_id = block_header.h_sequence
-
-                match block_header.h_blocktype:
-                    case ext4_structs.JBD2_DESCRIPTOR_BLOCK:
-                        self.dbg_print("JBD2_DESCRIPTOR_BLOCK")
-                        self.add_transaction(transaction_id)
-                        self.dbg_print(f"Transaction ID: {transaction_id}")
-                        transaction = self.transactions[transaction_id]
-                        tags = self._parse_descriptor_block_tags(data)
-                        if tags:
-                            for tag in tags:
-                                self.dbg_print(f"Block tag: {tag}")
-                                if self.jbd2_feature_incompat_64bit:
-                                    t_blocknr = tag.t_blocknr_high << 32 | tag.t_blocknr
-                                else:
-                                    t_blocknr = tag.t_blocknr
-                                block_num += 1
-                                data_block = self._read_journal_block(block_num)
-                                # If block_num is a part of inode table, parse it as inode list.
-                                # If not, parse it as external extended attributes or ext4_dir_entry_2 entries.
-                                inode_table_num, inode_table = self._check_inode_table_range(t_blocknr)
-                                if inode_table:
-                                    for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table_num, inode_table, data_block):
-                                        self.dbg_print(f"Inode number: {inode_num}")
-                                        self.dbg_print(f"Inode: {inode}")
-                                        self.dbg_print(f"Extended attributes: {eattrs}")
-                                        self.transactions[transaction_id].set_inode_info(t_blocknr, inode_num, inode, eattrs)
-                                else:
-                                    try:
-                                        symlink_target = data_block.decode("utf-8").rstrip("\x00")
-                                        self.dbg_print(f"Symlink target: {symlink_target}")
-                                        self.transactions[transaction_id].symlink_extents[t_blocknr] = symlink_target
-                                    except UnicodeDecodeError:
-                                        # Parse as external extended attributes
-                                        try:
-                                            _ = ext4_xattr_header.parse(data_block)
-                                            self.transactions[transaction_id].external_ea_blocks[t_blocknr] = self._parse_ea_entries(
-                                                data_block,
-                                                ext4_xattr_header.sizeof(),
-                                            )
-                                            self.dbg_print(
-                                                f"External extended attributes {t_blocknr}: {self.transactions[transaction_id].external_ea_blocks[t_blocknr]}",
-                                            )
-                                        # Parse as directory entries
-                                        except ConstError:
-                                            try:
-                                                dir_inode = 0
-                                                parent_inode = 0
-                                                self.dbg_print("Directory entry:")
-                                                dir_entries = self._parse_directory_entries(data_block)
-                                                if dir_entries:
-                                                    for dir_entry in dir_entries:
-                                                        if dir_entry:
-                                                            self.dbg_print(dir_entry)
-                                                            if dir_entry.name.decode("utf-8").rstrip("\x00") == ".":
-                                                                dir_inode = dir_entry.inode
-                                                                continue
-                                                            if dir_entry.name.decode("utf-8").rstrip("\x00") == "..":
-                                                                parent_inode = dir_entry.inode
-                                                                continue
-                                                        transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, dir_entry.inode, dir_entry)
-                                                elif dir_entries == []:
-                                                    transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, [])
-                                                elif dir_entries == None:  # StreamError exception happened in _parse_directory_entries()?
-                                                    transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, None)
-                                            except UnicodeDecodeError:
-                                                pass
-
-                    case ext4_structs.JBD2_COMMIT_BLOCK:
-                        self.dbg_print("JBD2_COMMIT_BLOCK")
-                        commit = commit_header.parse(data)
-                        if self.transactions.get(transaction_id):
-                            self.transactions[transaction_id].set_commit_time(commit)
-
-                    case ext4_structs.JBD2_REVOKE_BLOCK:
-                        self.dbg_print("JBD2_REVOKE_BLOCK")
-
-                    case ext4_structs.JBD2_SUPERBLOCK_V1:
-                        self.dbg_print("JBD2_SUPERBLOCK_V1 is not supported.")
-
-                    case ext4_structs.JBD2_SUPERBLOCK_V2:
-                        self.dbg_print("JBD2_SUPERBLOCK_V2")
-
-                    case _:
-                        msg = f"Invalid block type: {block_header.h_blocktype}"
-                        raise TypeError(msg)
-
+                if block_header.h_blocktype == ext4_structs.JBD2_DESCRIPTOR_BLOCK:
+                    found_descriptor_block = True
+                    tmp_journal_blocks[block_header.h_sequence] = block_num
+                elif block_header.h_blocktype == ext4_structs.JBD2_COMMIT_BLOCK and found_descriptor_block:
+                    journal_blocks.update(tmp_journal_blocks)
+                    found_descriptor_block = False
             except ConstError:
                 pass
+            finally:
+                block_num += 1
 
-            block_num += 1
+        sorted_journal_blocks = dict(sorted(journal_blocks.items()))
+
+        # while block_num < first_desc_block + journal_sb.s_maxlen - journal_sb.s_first:
+        for block_num in sorted_journal_blocks.values():
+            while True:
+                try:
+                    data = self._read_journal_block(block_num)
+                    block_header = journal_header_s.parse(data)
+                    self.dbg_print(f"Block header: {block_header}")
+                    transaction_id = block_header.h_sequence
+
+                    match block_header.h_blocktype:
+                        case ext4_structs.JBD2_DESCRIPTOR_BLOCK:
+                            self.dbg_print("JBD2_DESCRIPTOR_BLOCK")
+                            self.add_transaction(transaction_id)
+                            self.dbg_print(f"Transaction ID: {transaction_id}")
+                            transaction = self.transactions[transaction_id]
+                            tags = self._parse_descriptor_block_tags(data)
+                            if tags:
+                                for tag in tags:
+                                    self.dbg_print(f"Block tag: {tag}")
+                                    if self.jbd2_feature_incompat_64bit:
+                                        t_blocknr = tag.t_blocknr_high << 32 | tag.t_blocknr
+                                    else:
+                                        t_blocknr = tag.t_blocknr
+                                    block_num += 1
+                                    data_block = self._read_journal_block(block_num)
+                                    # If block_num is a part of inode table, parse it as inode list.
+                                    # If not, parse it as external extended attributes or ext4_dir_entry_2 entries.
+                                    inode_table_num, inode_table = self._check_inode_table_range(t_blocknr)
+                                    if inode_table:
+                                        for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table_num, inode_table, data_block):
+                                            self.dbg_print(f"Inode number: {inode_num}")
+                                            self.dbg_print(f"Inode: {inode}")
+                                            self.dbg_print(f"Extended attributes: {eattrs}")
+                                            self.transactions[transaction_id].set_inode_info(t_blocknr, inode_num, inode, eattrs)
+                                    else:
+                                        try:
+                                            symlink_target = data_block.decode("utf-8").rstrip("\x00")
+                                            self.dbg_print(f"Symlink target: {symlink_target}")
+                                            self.transactions[transaction_id].symlink_extents[t_blocknr] = symlink_target
+                                        except UnicodeDecodeError:
+                                            # Parse as external extended attributes
+                                            try:
+                                                _ = ext4_xattr_header.parse(data_block)
+                                                self.transactions[transaction_id].external_ea_blocks[t_blocknr] = self._parse_ea_entries(
+                                                    data_block,
+                                                    ext4_xattr_header.sizeof(),
+                                                )
+                                                self.dbg_print(
+                                                    f"External extended attributes {t_blocknr}: {self.transactions[transaction_id].external_ea_blocks[t_blocknr]}",
+                                                )
+                                            # Parse as directory entries
+                                            except ConstError:
+                                                try:
+                                                    dir_inode = 0
+                                                    parent_inode = 0
+                                                    self.dbg_print("Directory entry:")
+                                                    dir_entries = self._parse_directory_entries(data_block)
+                                                    if dir_entries:
+                                                        for dir_entry in dir_entries:
+                                                            if dir_entry:
+                                                                self.dbg_print(dir_entry)
+                                                                if dir_entry.name.decode("utf-8").rstrip("\x00") == ".":
+                                                                    dir_inode = dir_entry.inode
+                                                                    continue
+                                                                if dir_entry.name.decode("utf-8").rstrip("\x00") == "..":
+                                                                    parent_inode = dir_entry.inode
+                                                                    continue
+                                                            transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, dir_entry.inode, dir_entry)
+                                                    elif dir_entries == []:
+                                                        transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, [])
+                                                    elif dir_entries == None:  # StreamError exception happened in _parse_directory_entries()?
+                                                        transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, None)
+                                                except UnicodeDecodeError:
+                                                    pass
+
+                        case ext4_structs.JBD2_COMMIT_BLOCK:
+                            self.dbg_print("JBD2_COMMIT_BLOCK")
+                            commit = commit_header.parse(data)
+                            if self.transactions.get(transaction_id):
+                                self.transactions[transaction_id].set_commit_time(commit)
+                                break
+
+                        case ext4_structs.JBD2_REVOKE_BLOCK:
+                            self.dbg_print("JBD2_REVOKE_BLOCK")
+
+                        case ext4_structs.JBD2_SUPERBLOCK_V1:
+                            self.dbg_print("JBD2_SUPERBLOCK_V1 is not supported.")
+
+                        case ext4_structs.JBD2_SUPERBLOCK_V2:
+                            self.dbg_print("JBD2_SUPERBLOCK_V2")
+
+                        case _:
+                            msg = f"Invalid block type: {block_header.h_blocktype}"
+                            raise TypeError(msg)
+
+                except ConstError:
+                    pass
+
+                finally:
+                    block_num += 1
 
     def _generate_timeline_event(
         self,

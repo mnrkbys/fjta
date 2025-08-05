@@ -6,6 +6,8 @@
 #
 
 import copy
+import io
+import os
 from argparse import Namespace
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -13,6 +15,12 @@ from enum import Flag, IntEnum, auto
 
 import pytsk3
 from construct import Container, StreamError
+
+
+class FsTypes(IntEnum):
+    UNKNOWN = 0
+    EXT4 = auto()
+    XFS = auto()
 
 
 class FileTypes(IntEnum):
@@ -198,16 +206,18 @@ class TimelineEventInfo:
 
 
 class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, args: Namespace) -> None:
+    def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+        self.fstype = FsTypes.UNKNOWN
         self.img_info = img_info
         self.fs_info = fs_info
         self.offset = args.offset
         self.debug = args.debug
         self.special_inodes = args.special_inodes
-        self.block_size = self.fs_info.info.block_size
-        self.endian = self.fs_info.info.endian  # 1 = pytsk3.TSK_LIT_ENDIAN, 2 = pytsk3.TSK_BIG_ENDIAN
-        self.journal_file = None
-        if self.fs_info.info.journ_inum != 0:
+        # self.endian = self.fs_info.info.endian  # 1 = pytsk3.TSK_LIT_ENDIAN, 2 = pytsk3.TSK_BIG_ENDIAN
+        self.block_size = 0
+        self.journal_file = None  # Used in ext4
+        if self.fs_info and self.fs_info.info.journ_inum != 0:
+            # self.block_size = self.fs_info.info.block_size
             self.journal_file = self.fs_info.open_meta(self.fs_info.info.journ_inum)
         self.transactions: dict[int, T] = {}  # dict[transaction_id, JournalTransaction]
         self.working_dents: dict[int, DentInfo] = {}  # dict[dir_inode, DentInfo]
@@ -215,6 +225,14 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
             print(msg)
+
+    def read_data(self, address: int, size: int) -> bytes:
+        if isinstance(self.img_info, pytsk3.Img_Info):
+            return self.img_info.read(address, size)
+        if isinstance(self.img_info, io.BufferedReader):
+            self.img_info.seek(address, os.SEEK_SET)
+            return self.img_info.read(size)
+        raise TypeError("img_info must be either pytsk3.Img_Info or io.BufferedReader.")
 
     def _create_transaction(self, tid: int) -> T:
         msg = "Subclasses must implement _create_transaction."

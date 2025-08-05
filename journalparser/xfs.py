@@ -25,6 +25,7 @@
 # https://github.com/torvalds/linux/blob/master/include/linux/kdev_t.h
 
 import copy
+import io
 import json
 import sys
 from argparse import Namespace
@@ -44,6 +45,7 @@ from journalparser.common import (
     EntryInfoSource,
     ExtendedAttribute,
     FileTypes,
+    FsTypes,
     JournalParserCommon,
     JournalTransaction,
     TimelineEventInfo,
@@ -236,8 +238,9 @@ class LogRecordNotFoundError(Exception):
 
 
 class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
-    def __init__(self, img_info: pytsk3.Img_Info, fs_info: pytsk3.FS_Info, args: Namespace) -> None:
+    def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         super().__init__(img_info, fs_info, args)
+        self.fstype = FsTypes.XFS
         self.incomplete_log_ops: list[XfsLogOperation] = []
 
     def _convert_block_to_absaddr(self, block_num: int, log2val: int) -> int:
@@ -251,12 +254,13 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         return JournalTransactionXfs(tid)
 
     def _parse_xfs_superblock(self) -> None:
-        self.xfs_superblock = xfs_dsb.parse(self.img_info.read(self.offset + 0x0, 0x200))
+        self.xfs_superblock = xfs_dsb.parse(self.read_data(self.offset + 0x0, 0x200))
         self.dbg_print(f"XFS superblock: {self.xfs_superblock}")
         # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_format.h#L299 - XFS_SB_VERSION_NUM()
         if sb_ver := self.xfs_superblock.sb_versionnum & 0xF != 5:
             msg = f"XFS version: {sb_ver}. Only XFS version 5 is supported."
             raise ValueError(msg)
+        self.block_size = self.xfs_superblock.sb_blocksize
         self.sb_agblocks = self.xfs_superblock.sb_agblocks
         self.sb_logstart_addr = self._convert_block_to_absaddr(self.xfs_superblock.sb_logstart, self.xfs_superblock.sb_agblklog)
         self.sb_rootino = self.xfs_superblock.sb_rootino
@@ -265,7 +269,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
     def _find_first_log_record(self) -> int:
         xfs_sb = self.xfs_superblock
         for log_rec_addr in range(self.sb_logstart_addr, self.sb_logstart_addr + xfs_sb.sb_logblocks * self.block_size):
-            data = self.img_info.read(self.offset + log_rec_addr, self.block_size)
+            data = self.read_data(self.offset + log_rec_addr, self.block_size)
             xlog_record_header = xlog_rec_header.parse(data)
             if xlog_record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
                 self.dbg_print(f"First log record: {log_rec_addr}")
@@ -290,13 +294,13 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             read_len_1 = journal_data_len - read_pos
             read_len_2 = read_len - read_len_1
             self.dbg_print(f"_read_journal_data read_len_1: {read_len_1}")
-            data_1 = self.img_info.read(self.offset + self.sb_logstart_addr + read_pos, read_len_1)
+            data_1 = self.read_data(self.offset + self.sb_logstart_addr + read_pos, read_len_1)
             self.dbg_print(f"_read_journal_data data_1[:0x100]: {data_1[:0x100]}")
             self.dbg_print(f"_read_journal_data read_len_2: {read_len_2}")
-            data_2 = self.img_info.read(self.offset + self.sb_logstart_addr, read_len_2)
+            data_2 = self.read_data(self.offset + self.sb_logstart_addr, read_len_2)
             self.dbg_print(f"_read_journal_data data_2[:0x100]: {data_2[:0x100]}")
             return data_1 + data_2
-        data = self.img_info.read(self.offset + self.sb_logstart_addr + read_pos, read_len)
+        data = self.read_data(self.offset + self.sb_logstart_addr + read_pos, read_len)
         self.dbg_print(f"_read_journal_data data: {data}")
         return data
 
@@ -875,7 +879,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                                             self.dbg_print(f"log_op.item_data[:0x100]: {log_op.item_data[:0x100]}")
 
                             idx += op_size
-                journal_addr += record_header.h_len
 
     def _generate_timeline_event(
         self,

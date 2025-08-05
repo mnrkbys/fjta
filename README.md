@@ -20,11 +20,14 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Directories with few entries           | ✅     | ✅    |
 | Directories with many entries          | ✅     | ✅    |
 | Short symlink target names             | ✅     | ✅    |
-| Long symlink target names              | ✅     | ❌    |
+| Long symlink target names[^1]          | ✅     | ❌    |
 | Short extended attributes              | ✅     | ✅    |
-| Long extended attributes               | ✅     | ❌    |
+| Long extended attributes[^2]           | ✅     | ❌    |
 | Non-regular files (e.g. block devices) | ✅     | ✅    |
 | Year 2038 problem                      | ✅     | ✅    |
+
+[^1]: Symlink target names stored outside the inode.
+[^2]: Extended attributes stored outside the inode.
 
 ## Detectable Activities
 
@@ -34,15 +37,16 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Deleting files                        | ✅     | ✅    |
 | Modification of extended attributes   | ✅     | ✅    |
 | Timestomping (timestamp manipulation) | ✅     | ✅    |
-| Other inode metadata changes          | ✅     | ✅    |
+| Other inode metadata changes[^3]      | ✅     | ✅    |
 
-> [!NOTE]
-> "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
+[^3]: "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
 
 ## Requirements
 
+Tested with the following software and libraries:
+
 - Python 3.12 or later
-- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) 4.13.0 **only**
+- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) 4.13.0 or later
 - [pytsk3](https://github.com/py4n6/pytsk) 20250312 or later
 - [Construct](https://github.com/construct/construct) 2.10 or later
 
@@ -60,6 +64,7 @@ cd sleuthkit-4.13.0
 ./configure
 make
 sudo make install
+sudo ldconfig
 ```
 
 Then, install required Python packages.

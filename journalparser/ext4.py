@@ -640,6 +640,15 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         commit_time_nanoseconds = self.transactions[tid].commit_time_nanoseconds
         commit_time_f = float(f"{commit_time}.{commit_time_nanoseconds:09d}")
 
+        differences = self._compare_entry_fields(working_entry, transaction_entry)
+
+        # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
+        # ext4 inode does not have a field for managing file generations like XFS's di_gen field.
+        if any(field == "file_type" for field, *_ in differences):
+            reuse_inode = True
+            self.remove_directory_entries(inode_num)
+            self.update_directory_entries(transaction)
+
         # Delete inode
         # The ext4 inodes have a dtime field but ctime (or mtime) is more reliable for deletion detection. Because the ext4 inodes do not have a nanosecond field for dtime.
         if transaction_entry.dtime != 0:
@@ -660,15 +669,10 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             dtime_f = ctime_f
             self.remove_directory_entries(inode_num)
 
-        differences = self._compare_entry_fields(working_entry, transaction_entry)
-
-        # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
-        if any(field == "file_type" for field, *_ in differences):
-            reuse_inode = True
-            self.remove_directory_entries(inode_num)
-            self.update_directory_entries(transaction)
-
         transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
+
+        if not (action & Actions.DELETE_INODE) and reuse_inode:
+            action |= Actions.REUSE_INODE
 
         if not (action & Actions.DELETE_INODE) and differences:
             for field, current_value, new_value in differences:
@@ -682,7 +686,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         else:
                             new_crtime_nanoseconds = current_crtime_nanoseconds
 
-                        if transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
+                        if (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime) or reuse_inode:
                             action |= Actions.CREATE_INODE
                             msg = self.format_timestamp(new_crtime, new_crtime_nanoseconds, label="Crtime", follow=False)
                         else:

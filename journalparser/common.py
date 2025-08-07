@@ -40,6 +40,7 @@ class Actions(Flag):
     CREATE_HARDLINK = auto()
     DELETE_INODE = auto()
     DELETE_HARDLINK = auto()
+    REUSE_INODE = auto()
     RENAME = auto()
     MOVE = auto()
     ACCESS = auto()

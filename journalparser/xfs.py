@@ -100,6 +100,11 @@ class TransState(IntEnum):
 
 
 @dataclass
+class EntryInfoXfs(EntryInfo):
+    generation: int = 0  # Inode generation number (this value is same to xfs_dinode_core.di_gen)
+
+
+@dataclass
 class JournalTransactionXfs(JournalTransaction):
     record_len: int = 0
     record_format: int = 0
@@ -126,7 +131,7 @@ class JournalTransactionXfs(JournalTransaction):
         }
 
         if not self.entries.get(inode_num):
-            self.entries[inode_num] = EntryInfo()
+            self.entries[inode_num] = EntryInfoXfs()
         entry = self.entries[inode_num]
         entry.inode = inode_num
         if special_inodes.get(inode_num):
@@ -179,6 +184,7 @@ class JournalTransactionXfs(JournalTransaction):
         entry.link_count = inode.di_nlink
         entry.extended_attributes = eattrs
         entry.entryinfo_source |= EntryInfoSource.INODE
+        entry.generation = inode.di_gen
 
     def set_dent_info(self, block_num: int, dir_inode_num: int, parent_inode_num: int, inode_num: int, dir_entry: Container | list | None) -> None:
         # Set DentInfo
@@ -192,7 +198,7 @@ class JournalTransactionXfs(JournalTransaction):
             # This setting is required to mark directory entries recognized in the current transaction
             # so they can be merged with entries from previous transactions.
             if not self.entries.get(dir_inode_num):
-                self.entries[dir_inode_num] = EntryInfo(inode=dir_inode_num)
+                self.entries[dir_inode_num] = EntryInfoXfs(inode=dir_inode_num)
             self.entries[dir_inode_num].entryinfo_source |= EntryInfoSource.DIR_ENTRY
 
         if dir_entry:
@@ -208,7 +214,7 @@ class JournalTransactionXfs(JournalTransaction):
         # Set EntryInfo
         if dir_entry:
             if not self.entries.get(inode_num):
-                self.entries[inode_num] = EntryInfo(inode=inode_num)
+                self.entries[inode_num] = EntryInfoXfs(inode=inode_num)
             entry = self.entries[inode_num]
 
             # Set file type from directory entry
@@ -237,7 +243,7 @@ class LogRecordNotFoundError(Exception):
     pass
 
 
-class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
+class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs]):
     def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         super().__init__(img_info, fs_info, args)
         self.fstype = FsTypes.XFS
@@ -320,11 +326,23 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             idx += 1
         return 0
 
-    def _parse_log_operations(self, data: bytes) -> list[XfsLogOperation]:
-        idx = 0
+    def _parse_log_operations(self, data: bytes, cycle_number: int, cycle_data: list[int]) -> list[XfsLogOperation]:
+        idx = cycle_idx = 0
         tids: list[int] = []
         log_ops: list[XfsLogOperation] = []
         self.dbg_print(f"_parse_log_operations data: {data}")
+        # self.dbg_print(f"_parse_log_operations cycle_number: {cycle_number}")
+        self.dbg_print(f"_parse_log_operations cycle_data: {cycle_data}")
+
+        # Replace data with cycle_data each log sector
+        while cycle_idx * 0x200 < len(data):
+            self.dbg_print(
+                f"_parse_log_operations replace data[{cycle_idx * 0x200}:{cycle_idx * 0x200 + 4}]: {data[cycle_idx * 0x200 : cycle_idx * 0x200 + 4]} -> cycle_data[{cycle_idx}]: {cycle_data[cycle_idx].to_bytes(4, 'big')}",
+            )
+            data = data[: cycle_idx * 0x200] + cycle_data[cycle_idx].to_bytes(4, "big") + data[cycle_idx * 0x200 + 4 :]
+            cycle_idx += 1
+        self.dbg_print(f"_parse_log_operations replaced data: {data}")
+
         while idx < len(data):
             try:
                 self.dbg_print(f"_parse_log_operations data[{idx}:{idx + xlog_op_header.sizeof()}]: {data[idx : idx + xlog_op_header.sizeof()]}")
@@ -335,7 +353,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 # Unmount transaction is a special case.
                 if (
                     op_header.oh_tid > 0
-                    and op_header.oh_len == 0
+                    # and op_header.oh_len == 0  # Not needed?
                     and op_header.oh_clientid == xfs_structs.XFS_LOG
                     and op_header.oh_flags == xfs_structs.XLOG_UNMOUNT_TRANS
                 ):
@@ -547,7 +565,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                         ):
                             self.dbg_print(f"_parse_inode_update Symlink target data: {log_ops[idx].item_data}")
                             if not self._contains_control_chars_bytes(log_ops[idx].item_data):
-                                symlink_target = log_ops[idx].item_data.decode("utf-8").rstrip("\x00")
+                                symlink_target = log_ops[idx].item_data[: inode.di_size].decode("utf-8").rstrip("\x00")
                                 self.dbg_print(f"_parse_inode_update Symlink target: {symlink_target}")
                     except StreamError:
                         pass
@@ -667,7 +685,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                     yield buf_log_format.blf_blkno, dir3_data_hdr.hdr.owner, dir_entry
             elif dir3_data_hdr.hdr.magic == 0x58534C4D:  # XSLM = 0x58534c4d
                 # XFS Algorithms & Data Structures, chapter 22.2 Extent Symbolic Links
-                print("Found a log operation which XSLM magic number. Need to implement a parser for extent symbolic links.", file=sys.stderr)
+                print("Found a log operation which has the XSLM magic number. Need to implement a parser for extent symbolic links.", file=sys.stderr)
 
         except StreamError:
             pass
@@ -749,6 +767,11 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
             if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
+                if record_header.h_len >= xfs_structs.XLOG_HEADER_CYCLE_SIZE:
+                    print("Warning: xlog_rec_header.h_len is large: {record_header.h_len}", file=sys.stderr)
+                    print("A parser for xlog_rec_ext_header structure might be needed.", file=sys.stderr)
+                    print(f"journal_addr: {journal_addr}", file=sys.stderr)
+                    print(f"record_header: {record_header}", file=sys.stderr)
                 log_records[record_header.h_lsn] = journal_addr
                 journal_addr += record_header.h_len
             journal_addr += 0x200  # record header size is 0x200
@@ -759,7 +782,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
-            if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and record_header.h_cycle > 0:
+            # if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and record_header.h_cycle > 0:  # Not needed for checking h_cycle?
+            if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
                 transaction_id = record_header.h_lsn
                 self.add_transaction(transaction_id)
                 transaction = self.transactions[transaction_id]
@@ -767,12 +791,12 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                 transaction.record_format = record_header.h_fmt
                 journal_addr += 0x200  # record header size is 0x200
                 data = self._read_journal_data(journal_addr, record_header.h_len)
-                log_ops = self._parse_log_operations(data)
+                log_ops = self._parse_log_operations(data, record_header.h_cycle, record_header.h_cycle_data)
                 self.dbg_print(f"Number of log operations: record_header.h_num_logops = {record_header.h_num_logops}, log_ops = {len(log_ops)}")
                 if len(log_ops) == record_header.h_num_logops:
-                    self.dbg_print("All log operations found.")
+                    self.dbg_print("All log operations are found.")
                 else:
-                    self.dbg_print("Not all log operations found.")
+                    self.dbg_print("Not all log operations are found.")
 
                 if log_ops:
                     xfs_trans_header = xfs_log_item = None
@@ -884,7 +908,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         self,
         transaction: JournalTransactionXfs,
         inode_num: int,
-        working_entry: EntryInfo,
+        working_entry: EntryInfoXfs,
     ) -> TimelineEventInfo | None:
         tid = transaction.tid
         transaction_entry = transaction.entries[inode_num]
@@ -900,13 +924,35 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
         dtime_f = float(0)
 
+        differences = self._compare_entry_fields(working_entry, transaction_entry)
+
+        # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
+        # if any(field == "file_type" for field, *_ in differences):
+
+        # Changing generation implies inode reuse or deletion, even without DELETE_INODE in the previous transaction.
+        for field, current_value, new_value in differences:
+            if field == "generation":
+                if current_value < new_value:
+                    self.dbg_print(
+                        f"_generate_timeline_event: tid: {tid}, inode: {inode_num}, generation is incremented: {current_value} -> {new_value}",
+                    )
+                    reuse_inode = True
+                    self.remove_directory_entries(inode_num)
+                    self.update_directory_entries(transaction)
+                else:
+                    self.dbg_print(
+                        f"_generate_timeline_event: tid: {tid}, inode: {inode_num}, generation is not incremented: {current_value} -> {new_value}",
+                    )
+                break
+
         # Delete inode
         # The deletion time of XFS inodes is the same as ctime.
         if (
             transaction_entry.file_type == FileTypes.UNKNOWN
             and transaction_entry.mode in (0, 0x200)  # In some cases, mode is 0x200 (0o1000) for deleted inodes.
-            and transaction_entry.size == 0
+            # and transaction_entry.size == 0  # In many cases, size is 0 for deleted inodes. But not always.
             and transaction_entry.link_count == 0
+            and reuse_inode  # Even if the inode is deleted, the generation is incremented.
         ):
             action |= Actions.DELETE_INODE
             msg = self.format_timestamp(
@@ -919,19 +965,18 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
             dtime_f = ctime_f
             self.remove_directory_entries(inode_num)
 
-        differences = self._compare_entry_fields(working_entry, transaction_entry)
-
-        # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
-        if any(field == "file_type" for field, *_ in differences):
-            reuse_inode = True
-            self.remove_directory_entries(inode_num)
-            self.update_directory_entries(transaction)
-
         transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
+
+        if not (action & Actions.DELETE_INODE) and reuse_inode:
+            action |= Actions.REUSE_INODE
 
         if not (action & Actions.DELETE_INODE) and differences:
             for field, current_value, new_value in differences:
                 match field:
+                    # case "generation":
+                    #     if reuse_inode:
+                    #         action |= Actions.REUSE_INODE
+
                     case "crtime":  # Reuse inode or timestomping
                         current_crtime = current_value
                         current_crtime_nanoseconds = working_entry.crtime_nanoseconds
@@ -941,7 +986,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
                         else:
                             new_crtime_nanoseconds = current_crtime_nanoseconds
 
-                        if transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
+                        if (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime) or reuse_inode:
                             action |= Actions.CREATE_INODE
                             msg = self.format_timestamp(new_crtime, new_crtime_nanoseconds, label="Crtime", follow=False)
                         else:
@@ -1160,7 +1205,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfo]):
         return timeline_event
 
     def timeline(self) -> None:
-        working_entries: dict[int, EntryInfo] = {}
+        working_entries: dict[int, EntryInfoXfs] = {}
         timeline_events: list[TimelineEventInfo] = []
         for tid in sorted(self.transactions):
             transaction = self.transactions[tid]

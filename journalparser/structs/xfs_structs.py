@@ -136,6 +136,12 @@ XLOG_FMT_LINUX_BE = 2  # Big-endian Linux.
 XLOG_FMT_IRIX_BE = 3  # Big-endian Irix.
 
 
+xlog_rec_ext_header = Struct(
+    "xh_cycle" / Int32ub,  # 0x00: Cycle number of this log record. Should match h_cycle.
+    "xh_cycle_data" / Array(XLOG_HEADER_CYCLE_SIZE // BBSIZE, Int32ub),  # 0x04: Overflow cycle data.
+)
+
+
 # XFS Log Operation Header structure
 xlog_op_header = Struct(
     "oh_tid" / Int32ub,  # 0x00: Transaction ID of this operation.
@@ -717,4 +723,29 @@ xfs_dir2_data_union = Struct(
         },
         default=xfs_dir2_data_entry,  # Directory entry
     ),
+)
+
+
+# Inode Creation Log Item structure (big endian)
+xfs_icreate_log_be = Struct(
+    "icl_type" / Int16ub,  # 0x00: The signature of an inode create operation, 0x123f (host-endian).
+    "icl_size" / Int16ub,  # 0x02: Size of this log item. Should be 1.
+    "icl_ag" / Int32ub,  # 0x04: AG number of the inode chunk to create.
+    "icl_agbno" / Int32ub,  # 0x08: AG block number of the inode chunk.
+    "icl_count" / Int32ub,  # 0x0C: Number of inodes to initialize.
+    "icl_isize" / Int32ub,  # 0x10: Size of each inode, in bytes.
+    "icl_length" / Int32ub,  # 0x14: Length of the extent being initialized, in blocks.
+    "icl_gen" / Int32ub,  # 0x18: Inode generation number to write into the new inodes.
+)
+
+# Inode Creation Log Item structure (little endian)
+xfs_icreate_log_le = Struct(
+    "icl_type" / Int16ul,  # 0x00: The signature of an inode create operation, 0x123f (host-endian).
+    "icl_size" / Int16ul,  # 0x02: Size of this log item. Should be 1.
+    "icl_ag" / Int32ul,  # 0x04: AG number of the inode chunk to create.
+    "icl_agbno" / Int32ul,  # 0x08: AG block number of the inode chunk.
+    "icl_count" / Int32ul,  # 0x0C: Number of inodes to initialize.
+    "icl_isize" / Int32ul,  # 0x10: Size of each inode, in bytes.
+    "icl_length" / Int32ul,  # 0x14: Length of the extent being initialized, in blocks.
+    "icl_gen" / Int32ul,  # 0x18: Inode generation number to write into the new inodes.
 )

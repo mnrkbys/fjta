@@ -644,6 +644,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
         # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
         # ext4 inode does not have a field for managing file generations like XFS's di_gen field.
+        # ext4's l_i_version field is not equivalent to XFS's di_gen field.
+        # If the last timeline event of the inode can be checked and its action is DELETE_INODE, the inode in this transaction is considered a reuse.
         if any(field == "file_type" for field, *_ in differences):
             reuse_inode = True
             self.remove_directory_entries(inode_num)
@@ -817,20 +819,21 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             action |= Actions.SIZE_DOWN
                         info = self._append_msg(info, f"Size: {current_value} -> {new_value}")
                     case "link_count":
-                        if reuse_inode:
-                            continue
+                        # if reuse_inode:
+                        #     continue
                         if working_entry.link_count < transaction_entry.link_count:
+                            if working_entry.link_count == 0:
+                                action |= Actions.CREATE_INODE
                             action |= Actions.CREATE_HARDLINK
-                            info = self._append_msg(
-                                info,
-                                f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
-                            )
                         elif working_entry.link_count > transaction_entry.link_count:
+                            if transaction_entry.link_count == 0:
+                                self.remove_directory_entries(inode_num)
+                                self.update_directory_entries(transaction)
                             action |= Actions.DELETE_HARDLINK
-                            info = self._append_msg(
-                                info,
-                                f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
-                            )
+                        info = self._append_msg(
+                            info,
+                            f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
+                        )
                     case "flags":
                         if reuse_inode:
                             continue
@@ -865,12 +868,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     case _:
                         pass
 
-            # Update working_entry with transaction_entry
-            for field, _, new_value in differences:
-                if field not in ("names",):
-                    setattr(working_entry, field, new_value)
-            working_entry.names = copy.deepcopy(transaction_entry.names)
-
         # Delete hard link
         if not reuse_inode and working_entry.link_count > transaction_entry.link_count:
             action |= Actions.DELETE_HARDLINK
@@ -900,6 +897,12 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 device_number=transaction_entry.device_number,
                 info=info,
             )
+
+        # Update working_entry with transaction_entry
+        for field, _, new_value in differences:
+            if field not in ("names",):
+                setattr(working_entry, field, new_value)
+        working_entry.names = copy.deepcopy(transaction_entry.names)
 
         return timeline_event
 

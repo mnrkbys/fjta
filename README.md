@@ -67,6 +67,12 @@ sudo make install
 sudo ldconfig
 ```
 
+Or, you can install the TSK package, if the Linux distribution you're using provide it.
+
+```bash
+sudo apt install sleuthkit
+```
+
 Then, install required Python packages.
 
 ```bash
@@ -89,7 +95,7 @@ git clone https://github.com/mnrkbys/fjta.git
 python ./fjta.py -i ~/ext4.img | jq
 ```
 
-### Filtering with a inode number
+### Filtering with an inode number
 
 ```bash
 python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.inode == 101040435)' | less
@@ -122,7 +128,7 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | contains("Added EA: secu
 python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security\\.selinux"; "i"))'
 ```
 
-## Sample Output
+## Sample Output (timestomping)
 
 ```bash
 {

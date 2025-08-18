@@ -38,6 +38,8 @@ from construct import (
     Union,
 )
 
+from journalparser.common import FileTypes
+
 # XFS Superblock Constants
 XFS_SB_MAGIC = b"\x58\x46\x53\x42"  # XFS Superblock magic number
 
@@ -372,6 +374,17 @@ S_IFIFO = 0o010000  # 0010000
 S_ISUID = 0o4000  # 0004000
 S_ISGID = 0o2000  # 0002000
 S_ISVTX = 0o1000  # 0001000
+
+FILETYPE_MAP = {
+    0: FileTypes.UNKNOWN,
+    S_IFREG: FileTypes.REGULAR_FILE,
+    S_IFDIR: FileTypes.DIRECTORY,
+    S_IFCHR: FileTypes.CHARACTER_DEVICE,
+    S_IFBLK: FileTypes.BLOCK_DEVICE,
+    S_IFIFO: FileTypes.FIFO,
+    S_IFSOCK: FileTypes.SOCKET,
+    S_IFLNK: FileTypes.SYMBOLIC_LINK,
+}
 
 # XFS Dinode Format Constants
 XFS_DINODE_FMT_DEV = 0  # Device

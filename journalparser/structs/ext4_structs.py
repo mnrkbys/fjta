@@ -31,6 +31,8 @@ from construct import (
     Struct,
 )
 
+from journalparser.common import FileTypes
+
 # EXT4 superblock structure
 ext4_superblock_s = Struct(
     "s_inodes_count" / Int32ul,  # 0x0: Total inode count
@@ -448,6 +450,17 @@ S_IFBLK = 0x6000  # Block device
 S_IFREG = 0x8000  # Regular file
 S_IFLNK = 0xA000  # Symbolic link
 S_IFSOCK = 0xC000  # Socket
+
+FILETYPE_MAP = {
+    0: FileTypes.UNKNOWN,
+    S_IFREG: FileTypes.REGULAR_FILE,
+    S_IFDIR: FileTypes.DIRECTORY,
+    S_IFCHR: FileTypes.CHARACTER_DEVICE,
+    S_IFBLK: FileTypes.BLOCK_DEVICE,
+    S_IFIFO: FileTypes.FIFO,
+    S_IFSOCK: FileTypes.SOCKET,
+    S_IFLNK: FileTypes.SYMBOLIC_LINK,
+}
 
 # i_flags field values
 EXT4_SECRM_FL = 0x1  # This file requires secure deletion (not implemented)

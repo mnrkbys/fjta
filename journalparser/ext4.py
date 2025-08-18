@@ -147,28 +147,13 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
                 self.dents[2].block_entries[block_num] = {}
             self.dents[2].block_entries[block_num].update({inode_num: [special_inodes[inode_num]]})
 
-        match inode.i_mode & 0xF000:
-            case ext4_structs.EXT4_FT_UNKNOWN:
-                entry.file_type = FileTypes.UNKNOWN
-            case ext4_structs.S_IFREG:
-                entry.file_type = FileTypes.REGULAR_FILE
-            case ext4_structs.S_IFDIR:
-                entry.file_type = FileTypes.DIRECTORY
-            case ext4_structs.S_IFCHR:
-                entry.file_type = FileTypes.CHARACTER_DEVICE
-            case ext4_structs.S_IFBLK:
-                entry.file_type = FileTypes.BLOCK_DEVICE
-            case ext4_structs.S_IFIFO:
-                entry.file_type = FileTypes.FIFO
-            case ext4_structs.S_IFSOCK:
-                entry.file_type = FileTypes.SOCKET
-            case ext4_structs.S_IFLNK:
-                entry.file_type = FileTypes.SYMBOLIC_LINK
-                result = self._retrieve_symlink_target(inode.i_block)
-                if isinstance(result, str):
-                    entry.symlink_target = result
-                elif isinstance(result, int):
-                    entry.symlink_block_num = result
+        entry.file_type = ext4_structs.FILETYPE_MAP.get(inode.i_mode & 0xF000, FileTypes.UNKNOWN)
+        if entry.file_type == FileTypes.SYMBOLIC_LINK:
+            result = self._retrieve_symlink_target(inode.i_block)
+            if isinstance(result, str):
+                entry.symlink_target = result
+            elif isinstance(result, int):
+                entry.symlink_block_num = result
         entry.mode = inode.i_mode & 0o7777  # Remove file type bits
         entry.uid = inode.i_osd2.l_i_uid_high << 16 | inode.i_uid
         entry.gid = inode.i_osd2.l_i_gid_high << 16 | inode.i_gid
@@ -476,6 +461,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 # yield from self._parse_linear_directory(data)
                 return self._parse_linear_directory(data)
             except StreamError:
+                self.dbg_print("_parse_directory_entries Exception StreamError")
                 # yield None
                 return None
 

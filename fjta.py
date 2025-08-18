@@ -72,6 +72,10 @@ def main() -> None:
         sys.exit(1)
 
     parser = journalparser.JournalParser(args.image, args)
+    if parser is None:
+        print("Unsupported filesystem.", file=sys.stderr)
+        sys.exit(1)
+
     parser.parse_journal()
     parser.timeline()
 

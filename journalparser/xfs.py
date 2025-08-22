@@ -530,8 +530,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             self.dbg_print(f"_parse_inode_update idx: {idx}")
             if (
                 inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_CORE
-                or inode_log_format_64.ilf_fields & 0x03000000
-                or inode_log_format_64.ilf_fields & 0x21000000
+                or inode_log_format_64.ilf_fields & 0x03000000  # Probably not needed
+                or inode_log_format_64.ilf_fields & 0x21000000  # Probably not needed
             ):
                 try:
                     self.dbg_print(f"_parse_inode_update xfs_dinode_core: {log_ops[idx].item_data}")
@@ -584,7 +584,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 idx += 1
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_UUID:
                 idx += 1
-            if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ADATA or inode_log_format_64.ilf_fields & 0x1E000000:
+            if (
+                inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ADATA or inode_log_format_64.ilf_fields & 0x1E000000
+            ):  # 0x1E000000 is probably not needed.
                 try:
                     eattrs = self._parse_eattrs_shortform(log_ops[idx], inode_log_format_64.ilf_asize)
                     self.dbg_print(f"_parse_inode_update Extended attributes (short form): {eattrs}")

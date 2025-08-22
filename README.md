@@ -56,7 +56,7 @@ Tested with the following software and libraries:
 
 ## Installation
 
-Compile and install the TSK, or simply install the package from the Linux distribution you are using.
+Compile and install the TSK.
 
 > [!NOTE]
 > TSK also requires other libraries such as libewf, libvmdk, and so on.
@@ -71,7 +71,7 @@ sudo make install
 sudo ldconfig
 ```
 
-Or, you can install the TSK package, if the Linux distribution you're using provides it.
+Or, simply install the TSK package from the Linux distribution you are using.
 
 ```bash
 sudo apt install sleuthkit

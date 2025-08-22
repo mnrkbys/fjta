@@ -266,7 +266,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             if hdr.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
                 self.dbg_print(f"First log record: {addr}")
                 return addr
-            addr += 4
+            # addr += 4
+            addr += 0x200  # Aligned to 0x200 ?
         return -1
 
     def _read_journal_data(self, journal_addr: int, read_len: int = 4096) -> bytes:

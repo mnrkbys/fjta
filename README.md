@@ -10,7 +10,7 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 - **Journal Analysis**: Scans ext4 and XFS journals to visualize modification history.
 - **Timeline Generation**: Organizes events within the journal in chronological order.
 - **Suspicious Activity Detection**: Identifies deleted files and potentially tampered operations.
-- **Cross-Platform Compatibility**: Written in Python, allowing analysis on any operating system.
+- **Cross-Platform**: Written in Python, allowing analysis on any operating system.
 
 ## Supported Artifacts in Filesystem Journals
 
@@ -45,10 +45,14 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 
 Tested with the following software and libraries:
 
-- Python 3.12 or later
-- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) 4.13.0 or later
-- [pytsk3](https://github.com/py4n6/pytsk) 20250312 or later
-- [Construct](https://github.com/construct/construct) 2.10 or later
+- [Python](https://www.python.org/) 3.12
+- [The Sleuth Kit](https://github.com/sleuthkit/sleuthkit) 4.14.0
+- [pytsk3](https://github.com/py4n6/pytsk) 20250729
+- [Construct](https://github.com/construct/construct) 2.10.70
+- [python-magic](https://github.com/ahupp/python-magic) 0.4.27
+- [libewf-python](https://pypi.org/project/libewf-python/) 20240506
+- [libvmdk-python](https://pypi.org/project/libvmdk-python/) 20240510
+- [libvhdi-python](https://pypi.org/project/libvhdi-python/) 20240509
 
 ## Installation
 
@@ -67,7 +71,7 @@ sudo make install
 sudo ldconfig
 ```
 
-Or, you can install the TSK package, if the Linux distribution you're using provide it.
+Or, you can install the TSK package, if the Linux distribution you're using provides it.
 
 ```bash
 sudo apt install sleuthkit
@@ -75,10 +79,13 @@ sudo apt install sleuthkit
 
 Then, install required Python packages.
 
+> [!NOTE]
+> If you build TSK and dependent libraries from source, their Python bindings may be installed under `/usr/local/lib/python3/dist-packages/`. In that case, add the path to `PYTHONPATH` as shown below.
+
 ```bash
 python3 -m venv .venv
 PYTHONPATH=/usr/local/lib/python3/dist-packages/:$PYTHONPATH source .venv/bin/activate
-pip install pytsk3 construct
+pip install pytsk3 construct python-magic libewf-python libvmdk-python libvhdi-python
 ```
 
 Clone FJTA.
@@ -131,6 +138,7 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security
 ## Sample Output (timestomping)
 
 ```bash
+...
 {
   "transaction_id": 3,
   "action": "CREATE_INODE|CREATE_HARDLINK",
@@ -198,6 +206,14 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security
 - Ubuntu 24.10 with kernel 6.8.0-63
 - Rocky Linux 9.4 with kernel 5.14.0-427.31.1.el9_4.x86_64
 
+## Supported Formats
+
+- RAW
+- EWF
+- VMDK
+- VHD / VHDX
+- Directory filesystem (ext4 and XFS partitions)
+
 ## Contributing
 
 Contributions are welcome! If you wish to contribute, please fork the repository and create a feature branch. Pull requests are greatly appreciated.
@@ -205,9 +221,9 @@ Contributions are welcome! If you wish to contribute, please fork the repository
 ## Limitations
 
 - FJTA is still under development, so some filesystem data may not be available for analysis. Additionally, the output format is subject to change.
-- FJTA only supports RAW disk images.
 - FJTA can analyze only ext4 and XFS version 5 (inode version 3).
-- Only ext4 journals stored with "data=ordered" are supported.
+- FJTA does not support LVM.
+- Only ext4 journals stored with "data=ordered" are supported. data=ordered is the default journaling mode in most Linux distributions.
 - Fast commit on ext4 is not supported.
 - External journals are not supported.
 

@@ -248,12 +248,11 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             raise ValueError(msg)
 
     def _parse_block_group_descriptors(self) -> None:
-        img_info = self.img_info
         self.bg_descriptors: list[Container] = []
         block_idx = 1  # Skip first block (Group 0 padding + EXT4 superblock)
         found_empty_bg_desc = False
         while not found_empty_bg_desc:
-            bg_desc_block_data = img_info.read(self.offset + block_idx * self.block_size, self.block_size)
+            bg_desc_block_data = self.img_info.read(self.offset + block_idx * self.block_size, self.block_size)
             bg_desc_entry_idx = 0
             while bg_desc_entry_idx < self.block_size:
                 bg_desc_entry_data = bg_desc_block_data[bg_desc_entry_idx : bg_desc_entry_idx + ext4_group_desc.sizeof()]

@@ -5,6 +5,7 @@
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
 #
 
+
 import copy
 import io
 import os
@@ -12,8 +13,13 @@ from argparse import Namespace
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
+from pathlib import Path
+from typing import Protocol, runtime_checkable
 
+import pyewf
 import pytsk3
+import pyvhdi
+import pyvmdk
 from construct import Container, StreamError
 
 
@@ -21,6 +27,90 @@ class FsTypes(IntEnum):
     UNKNOWN = 0
     EXT4 = auto()
     XFS = auto()
+    EXT4_EXPORTED_JOURNAL = auto()
+    XFS_EXPORTED_JOURNAL = auto()
+
+
+class DiskImgTypes(IntEnum):
+    UNKNOWN = 0
+    RAW = auto()
+    EWF = auto()
+    VMDK = auto()
+    VHDI = auto()
+
+
+@runtime_checkable
+class ImageLike(Protocol):
+    def read(self, offset: int, size: int) -> bytes: ...
+    def get_size(self) -> int: ...
+    def close(self) -> None: ...
+
+
+class EWFImgInfo(pytsk3.Img_Info):
+    def __init__(self, ewf_handle: pyewf.handle) -> None:
+        self._ewf_handle: pyewf.handle = ewf_handle
+        super().__init__(url="")
+
+    def read(self, offset: int, size: int) -> bytes:
+        self._ewf_handle.seek(offset)
+        return self._ewf_handle.read(size)
+
+    def get_size(self) -> int:
+        return self._ewf_handle.get_media_size()
+
+    def close(self) -> None:
+        self._ewf_handle.close()
+        super().close()
+
+
+class VMDKImgInfo(pytsk3.Img_Info):
+    def __init__(self, vmdk_handle: pyvmdk.handle) -> None:
+        self._vmdk_handle: pyvmdk.handle = vmdk_handle
+        super().__init__(url="")
+
+    def read(self, offset: int, size: int) -> bytes:
+        self._vmdk_handle.seek(offset)
+        return self._vmdk_handle.read(size)
+
+    def get_size(self) -> int:
+        return self._vmdk_handle.get_media_size()
+
+    def close(self) -> None:
+        self._vmdk_handle.close()
+        super().close()
+
+
+class VHDIImgInfo(pytsk3.Img_Info):
+    def __init__(self, vhdi_handle: pyvhdi.file) -> None:
+        self._vhdi_handle: pyvhdi.file = vhdi_handle
+        super().__init__(url="")
+
+    def read(self, offset: int, size: int) -> bytes:
+        self._vhdi_handle.seek(offset)
+        return self._vhdi_handle.read(size)
+
+    def get_size(self) -> int:
+        return self._vhdi_handle.get_media_size()
+
+    def close(self) -> None:
+        self._vhdi_handle.close()
+        super().close()
+
+
+class RAWImgInfo:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._file = path.open("rb")
+
+    def read(self, offset: int, size: int) -> bytes:
+        self._file.seek(offset)
+        return self._file.read(size)
+
+    def get_size(self) -> int:
+        return self._path.stat().st_size
+
+    def close(self) -> None:
+        self._file.close()
 
 
 class FileTypes(IntEnum):
@@ -207,7 +297,7 @@ class TimelineEventInfo:
 
 
 class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
-    def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    def __init__(self, img_info: ImageLike | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         self.fstype = FsTypes.UNKNOWN
         self.img_info = img_info
         self.fs_info = fs_info
@@ -228,7 +318,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             print(msg)
 
     def read_data(self, address: int, size: int) -> bytes:
-        if isinstance(self.img_info, pytsk3.Img_Info):
+        if isinstance(self.img_info, ImageLike):
             return self.img_info.read(address, size)
         if isinstance(self.img_info, io.BufferedReader):
             self.img_info.seek(address, os.SEEK_SET)

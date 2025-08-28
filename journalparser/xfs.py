@@ -273,16 +273,18 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
     def _read_journal_data(self, journal_addr: int, read_len: int = 4096) -> bytes:
         self.dbg_print(f"_read_journal_data journal_addr: 0x{journal_addr:0x}, read_len: {read_len}")
         xfs_sb = self.xfs_superblock
-        if journal_addr < self.offset + self.sb_logstart_addr:
+        if journal_addr < self.sb_logstart_addr:
+            self.dbg_print(
+                f"_read_journal_data journal_addr is smaller than self.sb_logstart_addr. something is wrong.: {journal_addr} < {self.sb_logstart_addr}",
+            )
             return b""
         journal_data_len = xfs_sb.sb_logblocks * self.block_size
         self.dbg_print(f"_read_journal_data sb_logblocks: {xfs_sb.sb_logblocks}")
         self.dbg_print(f"_read_journal_data block_size: {self.block_size}")
         self.dbg_print(f"_read_journal_data journal_data_len: {journal_data_len}")
-        read_pos = ((journal_addr - self.offset) - self.sb_logstart_addr) % journal_data_len
+        read_pos = (journal_addr - self.sb_logstart_addr) % journal_data_len
         self.dbg_print(f"_read_journal_data sb_logstart_addr: {self.sb_logstart_addr}")
         self.dbg_print(f"_read_journal_data read_pos: {read_pos}")
-        # if self.sb_logstart_addr + read_pos + read_len > self.sb_logstart_addr + journal_data_len:
         if read_pos + read_len >= journal_data_len:
             read_len_1 = journal_data_len - read_pos
             read_len_2 = read_len - read_len_1

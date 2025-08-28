@@ -22,6 +22,7 @@ import argparse
 import sys
 
 from journalparser import journalparser
+from journalparser.journalparser import UnsupportedFilesystemError, UnsupportedImageError
 from journalparser.version import VERSION
 
 
@@ -66,18 +67,20 @@ def parse_arguments() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+
 def main() -> None:
     if not args.image:
         print("Please specify a disk image file.", file=sys.stderr)
         sys.exit(1)
 
-    parser = journalparser.JournalParser(args.image, args)
-    if parser is None:
-        print("Unsupported disk image or filesystem.", file=sys.stderr)
+    try:
+        parser = journalparser.JournalParser(args.image, args)
+    except (FileNotFoundError, ValueError, UnsupportedImageError, UnsupportedFilesystemError) as err:
+        print(err, file=sys.stderr)
         sys.exit(1)
-
-    parser.parse_journal()
-    parser.timeline()
+    else:
+        parser.parse_journal()
+        parser.timeline()
 
 
 if __name__ == "__main__":

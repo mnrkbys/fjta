@@ -5,6 +5,7 @@
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
 #
 
+import contextlib
 from argparse import Namespace
 from pathlib import Path
 from typing import BinaryIO, Self
@@ -31,29 +32,38 @@ MAGIC_PATTERNS = {
 }
 
 
+class UnsupportedImageError(ValueError):
+    """Unsupported disk image format."""
+
+
+class UnsupportedFilesystemError(UnsupportedImageError):
+    """Unsupported filesystem (not EXT4/XFS)."""
+
+
 class JournalParser:
     # Attribute annotations for static type checking
     img_info: pytsk3.Img_Info | EWFImgInfo | VMDKImgInfo | VHDIImgInfo | RAWImgInfo | BinaryIO | None
     fs_info: pytsk3.FS_Info | None
     journal_parser: ext4.JournalParserExt4 | xfs.JournalParserXfs
 
-    def __new__(cls, img_file: str | Path, args: Namespace) -> Self | None:
+    def __new__(cls, img_file: str | Path, args: Namespace) -> Self:
         path = Path(img_file).expanduser().resolve()
+        if not path.exists():
+            msg = f"File does not exist: {img_file}"
+            raise FileNotFoundError(msg)
         if not (path.is_file() or path.is_block_device()):
-            return None
+            msg = f"File must be a regular file or block device: {img_file}"
+            raise ValueError(msg)
 
         magic_sig = cls._probe_magic(path)
         img_info, img_type = cls._wrap_image(path, magic_sig)
         if img_info is None:
-            return None
+            msg = f"Unsupported disk image format: {path}"
+            raise UnsupportedImageError(msg)
 
         fs = cls._detect_fs(img_info, img_type, args)
         if fs == FsTypes.EXT4:
-            try:
-                fs_info = pytsk3.FS_Info(img_info, args.offset)
-            except OSError:
-                img_info.close()
-                return None
+            fs_info = pytsk3.FS_Info(img_info, args.offset)
             self = super().__new__(cls)
             self.img_info = img_info
             self.fs_info = fs_info
@@ -67,7 +77,10 @@ class JournalParser:
             self.journal_parser = xfs.JournalParserXfs(self.img_info, None, args)
             return self
 
-        return None
+        with contextlib.suppress(Exception):
+            img_info.close()
+        msg = f"Unsupported filesystem: {path}"
+        raise UnsupportedFilesystemError(msg)
 
     @staticmethod
     def _probe_magic(path: Path) -> str:

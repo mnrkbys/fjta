@@ -54,7 +54,7 @@ Tested with the following software and libraries:
 - [libvmdk-python](https://pypi.org/project/libvmdk-python/) 20240510
 - [libvhdi-python](https://pypi.org/project/libvhdi-python/) 20240509
 
-## Installation
+## Installation From Source
 
 Compile and install the TSK.
 
@@ -62,36 +62,56 @@ Compile and install the TSK.
 > TSK also requires other libraries such as libewf, libvmdk, and so on.
 
 ```bash
-wget https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.13.0/sleuthkit-4.13.0.tar.gz
-tar xvzf sleuthkit-4.13.0.tar.gz
-cd sleuthkit-4.13.0
+wget https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.14.0/sleuthkit-4.14.0.tar.gz
+tar xvzf sleuthkit-4.14.0.tar.gz
+cd sleuthkit-4.14.0
 ./configure
 make
 sudo make install
+sudo echo /usr/local/lib > /etc/ld.so.conf.d/local-lib.conf
 sudo ldconfig
 ```
 
-Or, simply install the TSK package from the Linux distribution you are using.
-
-```bash
-sudo apt install sleuthkit
-```
-
-Then, install required Python packages.
-
-> [!NOTE]
-> If you build TSK and dependent libraries from source, their Python bindings may be installed under `/usr/local/lib/python3/dist-packages/`. In that case, add the path to `PYTHONPATH` as shown below.
-
-```bash
-python3 -m venv .venv
-PYTHONPATH=/usr/local/lib/python3/dist-packages/:$PYTHONPATH source .venv/bin/activate
-pip install pytsk3 construct python-magic libewf-python libvmdk-python libvhdi-python
-```
-
-Clone FJTA.
+Then, clone FJTA.
 
 ```bash
 git clone https://github.com/mnrkbys/fjta.git
+cd fjta
+```
+
+Finally, install required Python packages.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install pytsk3 construct python-magic libewf-python libvmdk-python libvhdi-python
+```
+
+## Installation From Packages
+
+Install the TSK package from the Linux distribution you are using.
+
+> [!NOTE]
+> In older versions of libvmdk, you cannot open VMDK files created with VMware Workstation for Windows (Japanese edition).
+> The patch was integrated in [2022](https://github.com/libyal/libvmdk/pull/31).
+
+```bash
+sudo apt install sleuthkit python3-tsk libewf2 libvmdk1 libvhdi1 python3-libewf python3-libvmdk python3-libvhdi
+```
+
+Then, clone FJTA.
+
+```bash
+git clone https://github.com/mnrkbys/fjta.git
+cd fjta
+```
+
+Finally, install required Python packages.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install construct python-magic
 ```
 
 ## Usage

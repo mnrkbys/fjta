@@ -749,7 +749,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             tmp_log_ops.extend(log_ops[idx + 1 :])
             self.incomplete_log_ops = []
             self.dbg_print(f"_concatenate_log_ops concatenated log_ops: {tmp_log_ops}")
-            # self.dbg_print(f"_concatenate_log_ops incomplete_log_ops: {self.incomplete_log_ops}")
             return tmp_log_ops
 
         return log_ops
@@ -909,306 +908,32 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
                             idx += op_size
 
-    def _generate_timeline_event(
-        self,
-        transaction: JournalTransactionXfs,
-        inode_num: int,
-        working_entry: EntryInfoXfs,
-    ) -> TimelineEventInfo | None:
-        tid = transaction.tid
-        transaction_entry = transaction.entries[inode_num]
+    def _reuse_predicate(self, differences: dict[str, tuple[object, object]]) -> bool:
+        return ("file_type" in differences) or ("generation" in differences)
 
-        timeline_event = None
-        action = Actions.UNKNOWN
-        msg = info = ""
-        reuse_inode = False
-
-        atime_f = float(f"{transaction_entry.atime}.{transaction_entry.atime_nanoseconds:09d}")
-        ctime_f = float(f"{transaction_entry.ctime}.{transaction_entry.ctime_nanoseconds:09d}")
-        mtime_f = float(f"{transaction_entry.mtime}.{transaction_entry.mtime_nanoseconds:09d}")
-        crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
-        dtime_f = float(0)
-
-        differences = self._compare_entry_fields(working_entry, transaction_entry)
-
-        # Changing file_type or generation imply inode reuse or deletion, even without DELETE_INODE in the previous transaction.
-        if any(field in ("file_type", "generation") for field, *_ in differences):
-            reuse_inode = True
-            self.remove_directory_entries(inode_num)
-            self.update_directory_entries(transaction)
-        # for field, current_value, new_value in differences:
-        #     if field == "file_type":
-        #         reuse_inode = True
-        #     elif field == "generation":
-        #         self.dbg_print("_generate_timeline_event: tid: {tid}, inode: {inode_num}, generation: {current_value} -> {new_value}")
-        #         if current_value == 0:
-        #             reuse_inode = False
-        #         elif current_value != new_value:
-        #             reuse_inode = True
-        # if reuse_inode:
-        #     self.remove_directory_entries(inode_num)
-        #     self.update_directory_entries(transaction)
-
-        # Delete inode
-        # The deletion time of XFS inodes is the same as ctime.
+    def _detect_delete(self, transaction_entry: EntryInfoXfs, reuse_inode: bool) -> tuple[bool, int, int]:
         if (
             transaction_entry.file_type == FileTypes.UNKNOWN
-            and transaction_entry.mode in (0, 0x200)  # In some cases, mode is 0x200 (0o1000) for deleted inodes.
+            and transaction_entry.mode in (0, 0x200)
             # and transaction_entry.size == 0  # In many cases, size is 0 for deleted inodes. But not always.
             and transaction_entry.link_count == 0
-            and reuse_inode  # Even if the inode is deleted, the generation is incremented.
+            and reuse_inode
         ):
-            action |= Actions.DELETE_INODE
-            msg = self.format_timestamp(
-                transaction_entry.ctime,
-                transaction_entry.ctime_nanoseconds,
-                label="Dtime",
-                follow=False,
-            )
-            info = self._append_msg(info, msg)
-            dtime_f = ctime_f
-            self.remove_directory_entries(inode_num)
-            self.update_directory_entries(transaction)
+            return True, transaction_entry.ctime, transaction_entry.ctime_nanoseconds
+        return False, 0, 0
 
-        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
+    def _apply_flag_changes(self, new_flags: int) -> str:
+        msg = ""
+        if new_flags & xfs_structs.XFS_DIFLAG_IMMUTABLE:
+            msg = self._append_msg(msg, "Immutable", " ")
+        if new_flags & xfs_structs.XFS_DIFLAG_NOATIME:
+            msg = self._append_msg(msg, "NoAtime", " ")
+        if new_flags & xfs_structs.XFS_DIFLAG_PREALLOC:
+            msg = self._append_msg(msg, "Preallocated", " ")
+        return msg
 
-        if not (action & Actions.DELETE_INODE) and reuse_inode:
-            action |= Actions.REUSE_INODE
-
-        if not (action & Actions.DELETE_INODE) and differences:
-            for field, current_value, new_value in differences:
-                match field:
-                    # case "generation":
-                    #     if reuse_inode:
-                    #         action |= Actions.REUSE_INODE
-
-                    case "crtime":  # Reuse inode or timestomping
-                        current_crtime = current_value
-                        current_crtime_nanoseconds = working_entry.crtime_nanoseconds
-                        new_crtime = new_value
-                        if result := self._filter_differences(differences, "crtime_nanoseconds"):
-                            _, _, new_crtime_nanoseconds = result
-                        else:
-                            new_crtime_nanoseconds = current_crtime_nanoseconds
-
-                        if (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime) or reuse_inode:
-                            action |= Actions.CREATE_INODE
-                            msg = self.format_timestamp(new_crtime, new_crtime_nanoseconds, label="Crtime", follow=False)
-                        else:
-                            msg = self.format_timestamp(
-                                current_crtime,
-                                current_crtime_nanoseconds,
-                                new_crtime,
-                                new_crtime_nanoseconds,
-                                "Crtime",
-                            )
-
-                        current_crtime_f = float(f"{current_crtime}.{current_crtime_nanoseconds:09d}")
-                        new_crtime_f = float(f"{new_crtime}.{new_crtime_nanoseconds:09d}")
-                        if new_crtime_f < current_crtime_f:
-                            action |= Actions.TIMESTOMP
-                            msg = self.format_timestamp(
-                                current_crtime,
-                                current_crtime_nanoseconds,
-                                new_crtime,
-                                new_crtime_nanoseconds,
-                                "Crtime",
-                            )
-                            msg += " (Timestomp)"
-                        info = self._append_msg(info, msg)
-                    case "atime":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.ACCESS
-                        current_atime = current_value
-                        current_atime_nanoseconds = working_entry.atime_nanoseconds
-                        new_atime = new_value
-                        if result := self._filter_differences(differences, "atime_nanoseconds"):
-                            _, _, new_atime_nanoseconds = result
-                        else:
-                            new_atime_nanoseconds = current_atime_nanoseconds
-                        msg = self.format_timestamp(
-                            current_atime,
-                            current_atime_nanoseconds,
-                            new_atime,
-                            new_atime_nanoseconds,
-                            "Atime",
-                        )
-
-                        current_atime_f = float(f"{current_atime}.{current_atime_nanoseconds:09d}")
-                        new_atime_f = float(f"{new_atime}.{new_atime_nanoseconds:09d}")
-                        if new_atime_f < current_atime_f:
-                            action |= Actions.TIMESTOMP
-                            msg += " (Timestomp)"
-                        info = self._append_msg(info, msg)
-                    case "ctime":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.CHANGE
-                        current_ctime = current_value
-                        current_ctime_nanoseconds = working_entry.ctime_nanoseconds
-                        new_ctime = new_value
-                        if result := self._filter_differences(differences, "ctime_nanoseconds"):
-                            _, _, new_ctime_nanoseconds = result
-                        else:
-                            new_ctime_nanoseconds = current_ctime_nanoseconds
-                        msg = self.format_timestamp(
-                            current_ctime,
-                            current_ctime_nanoseconds,
-                            new_ctime,
-                            new_ctime_nanoseconds,
-                            "Ctime",
-                        )
-
-                        current_ctime_f = float(f"{current_ctime}.{current_ctime_nanoseconds:09d}")
-                        new_ctime_f = float(f"{new_ctime}.{new_ctime_nanoseconds:09d}")
-                        if new_ctime_f < current_ctime_f:
-                            action |= Actions.TIMESTOMP
-                            msg += " (Timestomp)"
-                        info = self._append_msg(info, msg)
-                    case "mtime":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.MODIFY
-                        current_mtime = current_value
-                        current_mtime_nanoseconds = working_entry.mtime_nanoseconds
-                        new_mtime = new_value
-                        if result := self._filter_differences(differences, "mtime_nanoseconds"):
-                            _, _, new_mtime_nanoseconds = result
-                        else:
-                            new_mtime_nanoseconds = current_mtime_nanoseconds
-                        msg = self.format_timestamp(
-                            current_mtime,
-                            current_mtime_nanoseconds,
-                            new_mtime,
-                            new_mtime_nanoseconds,
-                            "Mtime",
-                        )
-
-                        current_mtime_f = float(f"{current_mtime}.{current_mtime_nanoseconds:09d}")
-                        new_mtime_f = float(f"{new_mtime}.{new_mtime_nanoseconds:09d}")
-                        if new_mtime_f < current_mtime_f:
-                            action |= Actions.TIMESTOMP
-                            msg += " (Timestomp)"
-                        info = self._append_msg(info, msg)
-                    case "mode":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.CHANGE_MODE
-                        info = self._append_msg(info, f"Mode: {current_value:04o} -> {new_value:04o}")
-                    case "uid":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.CHANGE_UID
-                        info = self._append_msg(info, f"UID: {current_value} -> {new_value}")
-                        if new_value & xfs_structs.S_ISUID:
-                            action |= Actions.SETUID
-                            info += " (SetUID)"
-                    case "gid":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.CHANGE_GID
-                        info = self._append_msg(info, f"GID: {current_value} -> {new_value}")
-                        if new_value & xfs_structs.S_ISGID:
-                            action |= Actions.SETGID
-                            info += " (SetGID)"
-                    case "size":
-                        if reuse_inode:
-                            continue
-                        if current_value < new_value:
-                            action |= Actions.SIZE_UP
-                        else:
-                            action |= Actions.SIZE_DOWN
-                        info = self._append_msg(info, f"Size: {current_value} -> {new_value}")
-                    case "link_count":
-                        # if reuse_inode:
-                        #     continue
-                        if working_entry.link_count < transaction_entry.link_count:
-                            if working_entry.link_count == 0:
-                                action |= Actions.CREATE_INODE
-                            action |= Actions.CREATE_HARDLINK
-                        elif working_entry.link_count > transaction_entry.link_count:
-                            if transaction_entry.link_count == 0:
-                                self.remove_directory_entries(inode_num)
-                                self.update_directory_entries(transaction)
-                            action |= Actions.DELETE_HARDLINK
-                        info = self._append_msg(
-                            info,
-                            f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}",
-                        )
-                    case "flags":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.CHANGE_FLAGS
-                        info = self._append_msg(info, f"Flags: 0x{current_value:x} -> 0x{new_value:x}")
-                        if new_value & xfs_structs.XFS_DIFLAG_IMMUTABLE:
-                            info = self._append_msg(info, "Immutable", " ")
-                        elif new_value & xfs_structs.XFS_DIFLAG_NOATIME:
-                            info = self._append_msg(info, "NoAtime", " ")
-                        elif new_value & xfs_structs.XFS_DIFLAG_PREALLOC:
-                            info = self._append_msg(info, "Preallocated", " ")
-                    case "symlink_target":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.CHANGE_SYMLINK_TARGET
-                        info = self._append_msg(info, f"Symlink Target: {current_value} -> {new_value}")
-                    case "extended_attributes":
-                        if reuse_inode:
-                            continue
-                        action |= Actions.CHANGE_EA
-                        added_ea, removed_ea = self._compare_extended_attributes(current_value, new_value)
-                        if added_ea:
-                            added_ea_str = ", ".join(f"{ea}" for ea in added_ea)
-                            info = self._append_msg(info, f"Added EA: {added_ea_str}")
-                        if removed_ea:
-                            removed_ea_str = ", ".join(f"{ea}" for ea in removed_ea)
-                            info = self._append_msg(info, f"Removed EA: {removed_ea_str}")
-                    case "names":
-                        if reuse_inode:
-                            continue
-                        if working_entry.link_count == transaction_entry.link_count and working_entry.names != transaction_entry.names:
-                            action |= Actions.MOVE
-                            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
-                    case _:
-                        pass
-
-        # Delete hard link
-        if not reuse_inode and working_entry.link_count > transaction_entry.link_count:
-            action |= Actions.DELETE_HARDLINK
-            # info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
-            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
-
-        if action != Actions.UNKNOWN:
-            timeline_event = TimelineEventInfo(
-                transaction_id=tid,
-                inode=inode_num,
-                file_type=transaction_entry.file_type,
-                names=transaction_entry.names,
-                action=action,
-                mode=transaction_entry.mode,
-                uid=transaction_entry.uid,
-                gid=transaction_entry.gid,
-                size=transaction_entry.size,
-                atime=atime_f,
-                ctime=ctime_f,
-                mtime=mtime_f,
-                crtime=crtime_f,
-                dtime=dtime_f,
-                flags=transaction_entry.flags,
-                link_count=transaction_entry.link_count,
-                symlink_target=transaction_entry.symlink_target,
-                extended_attributes=transaction_entry.extended_attributes,
-                device_number=transaction_entry.device_number,
-                info=info,
-            )
-
-        # Update working_entry with transaction_entry
-        for field, _, new_value in differences:
-            if field not in ("names",):
-                setattr(working_entry, field, new_value)
-        working_entry.names = copy.deepcopy(transaction_entry.names)
-
-        return timeline_event
+    def _generate_timeline_event(self, transaction: JournalTransactionXfs, inode_num: int, working_entry: EntryInfoXfs) -> TimelineEventInfo | None:
+        return self._generate_timeline_event_common(transaction, inode_num, working_entry, commit_ts=None)
 
     def timeline(self) -> None:
         working_entries: dict[int, EntryInfoXfs] = {}
@@ -1228,11 +953,11 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     msg = info = ""
                     action = Actions.UNKNOWN
                     working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
-                    atime_f = float(f"{transaction_entry.atime}.{transaction_entry.atime_nanoseconds:09d}")
-                    ctime_f = float(f"{transaction_entry.ctime}.{transaction_entry.ctime_nanoseconds:09d}")
-                    mtime_f = float(f"{transaction_entry.mtime}.{transaction_entry.mtime_nanoseconds:09d}")
-                    crtime_f = float(f"{transaction_entry.crtime}.{transaction_entry.crtime_nanoseconds:09d}")
-                    dtime_f = float(0)
+                    atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
+                    ctime_f = self._to_float_ts(transaction_entry.ctime, transaction_entry.ctime_nanoseconds)
+                    mtime_f = self._to_float_ts(transaction_entry.mtime, transaction_entry.mtime_nanoseconds)
+                    crtime_f = self._to_float_ts(transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
+                    dtime_f = 0.0
 
                     transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
@@ -1257,41 +982,21 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                         if transaction_entry.link_count > 0:
                             info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
 
-                    # Timestomp atime
-                    if atime_f < crtime_f:
-                        action |= Actions.ACCESS | Actions.TIMESTOMP
-                        msg = self.format_timestamp(
-                            transaction_entry.atime,
-                            transaction_entry.atime_nanoseconds,
-                            label="Atime",
-                            follow=False,
-                        )
-                        msg += " (Timestomp: atime < crtime)"
-                        info = self._append_msg(info, msg)
-
-                    # Timestomp ctime
-                    if ctime_f < crtime_f:
-                        action |= Actions.CHANGE | Actions.TIMESTOMP
-                        msg = self.format_timestamp(
-                            transaction_entry.ctime,
-                            transaction_entry.ctime_nanoseconds,
-                            label="Ctime",
-                            follow=False,
-                        )
-                        msg += " (Timestomp: ctime < crtime)"
-                        info = self._append_msg(info, msg)
-
-                    # Timestomp mtime
-                    if mtime_f < crtime_f:
-                        action |= Actions.MODIFY | Actions.TIMESTOMP
-                        msg = self.format_timestamp(
-                            transaction_entry.mtime,
-                            transaction_entry.mtime_nanoseconds,
-                            label="Mtime",
-                            follow=False,
-                        )
-                        msg += " (Timestomp: mtime < crtime)"
-                        info = self._append_msg(info, msg)
+                    for mac_type, mac_ts, act, label in (
+                        ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
+                        ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
+                        ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
+                    ):
+                        if self._timestomp((transaction_entry.crtime, transaction_entry.crtime_nanoseconds), mac_ts):
+                            action |= act | Actions.TIMESTOMP
+                            msg = self.format_timestamp(
+                                mac_ts[0],
+                                mac_ts[1],
+                                label=label,
+                                follow=False,
+                            )
+                            msg += f" (Timestomp: {mac_type} < crtime)"
+                            info = self._append_msg(info, msg)
 
                     # Set flags
                     if transaction_entry.flags & (
@@ -1299,12 +1004,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     ):
                         action |= Actions.CHANGE_FLAGS
                         info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
-                        if transaction_entry.flags & xfs_structs.XFS_DIFLAG_IMMUTABLE:
-                            info = self._append_msg(info, "Immutable", " ")
-                        elif transaction_entry.flags & xfs_structs.XFS_DIFLAG_NOATIME:
-                            info = self._append_msg(info, "NoAtime", " ")
-                        elif transaction_entry.flags & xfs_structs.XFS_DIFLAG_PREALLOC:
-                            info = self._append_msg(info, "Preallocated", " ")
+                        if add_info := self._apply_flag_changes(transaction_entry.flags):
+                            info = self._append_msg(info, add_info, " ")
 
                     # Update working_entry with transaction_entry
                     working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)

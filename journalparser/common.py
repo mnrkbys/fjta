@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import pyewf
 import pytsk3
@@ -229,6 +229,7 @@ class EntryInfo:
     device_number: DeviceNumber = field(default_factory=DeviceNumber)
     entryinfo_source: EntryInfoSource = EntryInfoSource.UNKNOWN
 
+EntryInfoTypes = int | str | FileTypes | list[ExtendedAttribute] | DeviceNumber | EntryInfoSource
 
 @dataclass
 class JournalTransaction[T: EntryInfo]:
@@ -339,7 +340,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         raise NotImplementedError(msg)
 
     @staticmethod
-    def _compare_entry_fields(current_entry: U, new_entry: U) -> list[tuple[str, any, any]]:
+    def _compare_entry_fields(current_entry: U, new_entry: U) -> list[tuple[str, EntryInfoTypes, EntryInfoTypes]]:
         differences: list[tuple] = []
         for entry_field in current_entry.__dataclass_fields__:
             if entry_field in ("entryinfo_source",):
@@ -350,12 +351,12 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 differences.append((entry_field, current_value, new_value))
         return differences
 
-    @staticmethod
-    def _filter_differences(differences: list[tuple[str, any, any]], field: str) -> tuple[str, any, any] | tuple:
-        filterd_diffs = list(filter(lambda x: x[0] == field, differences))
-        if filterd_diffs:
-            return filterd_diffs[0]
-        return ()
+    # @staticmethod
+    # def _filter_differences(differences: list[tuple[str, any, any]], field: str) -> tuple[str, any, any] | tuple:
+    #     filterd_diffs = list(filter(lambda x: x[0] == field, differences))
+    #     if filterd_diffs:
+    #         return filterd_diffs[0]
+    #     return ()
 
     @staticmethod
     def _append_msg(orig_msg: str, msg: str, delimiter: str = "|") -> str:
@@ -433,7 +434,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 names.update({dir_inode: tmp_names})
         return names
 
-    def _reuse_predicate(self, differences: dict[str, tuple[object, object]]) -> bool:
+    def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         raise NotImplementedError
 
     def _detect_delete(self, transaction_entry: U, reuse_inode: bool) -> tuple[bool, int, int]:
@@ -450,7 +451,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def _update_working_entry_fields(
         working_entry: U,
         transaction_entry: U,
-        differences: list[tuple[str, object, object]],
+        differences: list[tuple[str, EntryInfoTypes, EntryInfoTypes]],
     ) -> None:
         for field, _, new_value in differences:
             if field != "names":
@@ -502,9 +503,9 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         if not (action & Actions.DELETE_INODE) and diffs:
             # crtime
             if "crtime" in diffs:
-                cur_sec, new_sec = diffs["crtime"]
+                cur_sec, new_sec = cast("tuple[int, int]", diffs["crtime"])
                 cur_nsec = working_entry.crtime_nanoseconds
-                new_nsec = diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1]
+                new_nsec: int = cast("int", diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1])
                 if reuse_inode or (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime):
                     action |= Actions.CREATE_INODE
                     info = self._append_msg(info, self.format_timestamp(new_sec, new_nsec, label="Crtime", follow=False))
@@ -527,9 +528,9 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 if reuse_inode or field_name not in diffs:
                     continue
                 action |= act
-                cur_sec, new_sec = diffs[field_name]
+                cur_sec, new_sec = cast("tuple[int, int]", diffs[field_name])
                 cur_nsec = getattr(working_entry, f"{field_name}_nanoseconds")
-                new_nsec = diffs.get(f"{field_name}_nanoseconds", (cur_nsec, cur_nsec))[1]
+                new_nsec: int = cast("int", diffs.get(f"{field_name}_nanoseconds", (cur_nsec, cur_nsec))[1])
                 msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, label)
                 if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
                     action |= Actions.TIMESTOMP
@@ -557,7 +558,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
             # size
             if not reuse_inode and "size" in diffs:
-                cur, new = diffs["size"]
+                cur, new = cast("tuple[int, int]", diffs["size"])
                 action |= Actions.SIZE_UP if cur < new else Actions.SIZE_DOWN
                 info = self._append_msg(info, f"Size: {cur} -> {new}")
 
@@ -575,7 +576,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
             # flags
             if not reuse_inode and "flags" in diffs:
-                cur, new = diffs["flags"]
+                cur, new = cast("tuple[int, int]", diffs["flags"])
                 action |= Actions.CHANGE_FLAGS
                 info = self._append_msg(info, f"Flags: 0x{cur:x} -> 0x{new:x}")
                 add_info = self._apply_flag_changes(new)
@@ -590,8 +591,8 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
             # extended_attributes
             if not reuse_inode and "extended_attributes" in diffs:
+                cur, new = cast("tuple[list[ExtendedAttribute], list[ExtendedAttribute]]", diffs["extended_attributes"])
                 action |= Actions.CHANGE_EA
-                cur, new = diffs["extended_attributes"]
                 added, removed = self._compare_extended_attributes(cur, new)
                 if added:
                     info = self._append_msg(info, f"Added EA: {', '.join(map(str, added))}")

@@ -43,6 +43,7 @@ from journalparser.common import (
     DeviceNumber,
     EntryInfo,
     EntryInfoSource,
+    EntryInfoTypes,
     ExtendedAttribute,
     FileTypes,
     FsTypes,
@@ -144,8 +145,8 @@ class JournalTransactionXfs(JournalTransaction):
 
         entry.file_type = xfs_structs.FILETYPE_MAP.get(inode.di_mode & xfs_structs.S_IFMT, FileTypes.UNKNOWN)
         # This is a special case where the inode is a symbolic link but has no file type bits set.
-        if inode.di_magic == 0x0000 and inode.di_mode == 0x100:
-            entry.file_type = FileTypes.SYMBOLIC_LINK
+        # if inode.di_magic == 0x0000 and inode.di_mode == 0x100:
+        #     entry.file_type = FileTypes.SYMBOLIC_LINK
         entry.mode = inode.di_mode & 0o7777  # Remove file type bits
         entry.uid = inode.di_uid
         entry.gid = inode.di_gid
@@ -355,7 +356,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     log_ops.append(XfsLogOperation(op_header, b""))
                     return log_ops
 
-                # The transaction ID remains unchanged within a log record.
+                # The transaction ID does not change within a log record.
                 # So, if a different transaction ID appears, we need to guess the correct length of the log item.
                 # This is caused by incorrect value sometimes being recorded in oh_len. The reason why I don't know.
                 if tid == 0:
@@ -399,11 +400,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 self.dbg_print(f"_brute_force_xfs_dir2_sf_entry tmp_data: {tmp_data}")
                 dir2_sf_entry = self.xfs_dir2_sf_entry.parse(tmp_data)
                 self.dbg_print(f"_brute_force_xfs_dir2_sf_entry dir2_sf_entry: {dir2_sf_entry}")
-                if (
-                    # xfs_structs.XFS_DIR3_FT_REG_FILE <= dir2_sf_entry.ftype <= xfs_structs.XFS_DIR3_FT_SYMLINK
-                    xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_sf_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT
-                    # and not self._contains_control_chars_bytes(dir2_sf_entry.name, th_min=0x02)
-                    and not self._contains_control_chars_bytes(dir2_sf_entry.name)
+                if xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_sf_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT and not self._contains_control_chars_bytes(
+                    dir2_sf_entry.name,
                 ):
                     return dir2_sf_entry
                 namelen += 1
@@ -445,11 +443,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 self.dbg_print(f"_parse_directory_entries_shortform dir2_sf_entry: {dir2_sf_entry}")
                 if (
                     dir2_sf_entry.namelen == 0
-                    # or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
-                    # or dir2_sf_entry.ftype > xfs_structs.XFS_DIR3_FT_SYMLINK
                     or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_UNKNOWN
                     or dir2_sf_entry.ftype > xfs_structs.XFS_DIR3_FT_WHT
-                    # or self._contains_control_chars_bytes(dir2_sf_entry.name, th_min=0x02)
                     or self._contains_control_chars_bytes(dir2_sf_entry.name)
                 ):
                     self.dbg_print(f"Invalid directory entry: {dir2_sf_entry}")
@@ -532,8 +527,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             self.dbg_print(f"_parse_inode_update idx: {idx}")
             if (
                 inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_CORE
-                or inode_log_format_64.ilf_fields & 0x03000000  # Probably not needed
-                or inode_log_format_64.ilf_fields & 0x21000000  # Probably not needed
+                # or inode_log_format_64.ilf_fields & 0x03000000  # Probably not needed
+                # or inode_log_format_64.ilf_fields & 0x21000000  # Probably not needed
             ):
                 try:
                     self.dbg_print(f"_parse_inode_update xfs_dinode_core: {log_ops[idx].item_data}")
@@ -544,7 +539,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     #     This region contains the new contents of a part of an inode, as described in the previous section. There are no magic numbers.
                     #     If XFS_ILOG_CORE is set in ilf_fields, the corresponding data buffer must be in the format struct xfs_icdinode,
                     #     which has the same format as the first 96 bytes of an inode, but is recorded in host byte order.
-                    if inode.di_magic not in (xfs_structs.XFS_DINODE_MAGIC, 0x0000):
+                    # if inode.di_magic not in (xfs_structs.XFS_DINODE_MAGIC, 0x0000):
+                    if inode.di_magic != xfs_structs.XFS_DINODE_MAGIC:
                         msg = f"Invalid inode magic number: 0x{inode.di_magic:04x}"
                         self.dbg_print(msg)
                         raise ValueError(msg)
@@ -560,9 +556,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                             parent_inode, dir_entries = self._parse_directory_entries_shortform(log_ops[idx], inode_log_format_64.ilf_dsize)
                             self.dbg_print(f"_parse_inode_update Parent inode: {parent_inode}")
                             self.dbg_print(f"_parse_inode_update Directory entries (short form): {dir_entries}")
-                        elif inode.di_mode & xfs_structs.S_IFLNK or (
-                            inode.di_magic == 0x0000 and inode.di_mode == 0x100  # Seems a symlink. Is this condition correct?
-                        ):
+                        # elif inode.di_mode & xfs_structs.S_IFLNK or (
+                        #     inode.di_magic == 0x0000 and inode.di_mode == 0x100  # Seems a symlink. Is this condition correct?
+                        # ):
+                        elif inode.di_mode & xfs_structs.S_IFLNK:
                             self.dbg_print(f"_parse_inode_update Symlink target data: {log_ops[idx].item_data}")
                             if not self._contains_control_chars_bytes(log_ops[idx].item_data):
                                 symlink_target = log_ops[idx].item_data[: inode.di_size].decode("utf-8").rstrip("\x00")
@@ -587,7 +584,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             if inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_UUID:
                 idx += 1
             if (
-                inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ADATA or inode_log_format_64.ilf_fields & 0x1E000000
+                inode_log_format_64.ilf_fields & xfs_structs.XFS_ILOG_ADATA
+                # or inode_log_format_64.ilf_fields & 0x1E000000
             ):  # 0x1E000000 is probably not needed.
                 try:
                     eattrs = self._parse_eattrs_shortform(log_ops[idx], inode_log_format_64.ilf_asize)
@@ -604,7 +602,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
     def _brute_force_xfs_dir2_data_entry(self, data: bytes) -> Container | None:
         namelen = 1
-        while namelen < len(data):
+        while namelen < len(data) and namelen < 256:
             tmp_data = data[0:8]
             tmp_data += namelen.to_bytes(1, "big")
             tmp_data += data[9:]
@@ -612,16 +610,12 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             dir2_data_entry = xfs_dir2_data_entry.parse(tmp_data)
             self.dbg_print(f"_brute_force_xfs_dir2_data_entry dir2_data_entry: {dir2_data_entry}")
             if (
-                # xfs_structs.XFS_DIR3_FT_REG_FILE <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_SYMLINK
                 xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT
                 and dir2_data_entry.tag >= 64
-                # and not self._contains_control_chars_bytes(dir2_data_entry.name, th_min=0x02)
                 and not self._contains_control_chars_bytes(dir2_data_entry.name)
             ):
                 return dir2_data_entry
             namelen += 1
-            if namelen > 255:
-                break
         return None
 
     def _parse_block_directoreis(self, data: bytes) -> Generator[Container | None, None, None]:
@@ -637,12 +631,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     idx += dir2_data_unused.length
                     continue
                 elif (
-                    # dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_REG_FILE
-                    # or dir2_data_entry.ftype >= xfs_structs.XFS_DIR3_FT_WHT
                     dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_UNKNOWN
                     or dir2_data_entry.ftype > xfs_structs.XFS_DIR3_FT_WHT
                     or dir2_data_entry.tag < 64
-                    # or self._contains_control_chars_bytes(dir2_data_entry.name, th_min=0x02)
                     or self._contains_control_chars_bytes(dir2_data_entry.name)
                 ):
                     dir2_data_entry = self._brute_force_xfs_dir2_data_entry(data[idx:])
@@ -682,12 +673,15 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             # Parse as directory entries
             dir3_data_hdr = xfs_dir3_data_hdr.parse(tmp_data[0 : xfs_dir3_data_hdr.sizeof()])
             self.dbg_print(f"_parse_buffer_writes dir3_data_hdr: {dir3_data_hdr}")
+            magic = dir3_data_hdr.hdr.magic.to_bytes(4, "big")
             if (
-                dir3_data_hdr.hdr.magic in (0x58444233, 0x58444433) and blf_flags & XfsBlft.XFS_BLFT_DIR_BLOCK_BUF
+                # dir3_data_hdr.hdr.magic in (0x58444233, 0x58444433) and blf_flags & XfsBlft.XFS_BLFT_DIR_BLOCK_BUF
+                magic in (b"XDB3", b"XDD3") and blf_flags & XfsBlft.XFS_BLFT_DIR_BLOCK_BUF
             ):  # XDB3 = 0x58444233, XDD3 = 0x58444433
                 for dir_entry in self._parse_block_directoreis(tmp_data[xfs_dir3_data_hdr.sizeof() :]):
                     yield buf_log_format.blf_blkno, dir3_data_hdr.hdr.owner, dir_entry
-            elif dir3_data_hdr.hdr.magic == 0x58534C4D:  # XSLM = 0x58534c4d
+            # elif dir3_data_hdr.hdr.magic == 0x58534C4D:  # XSLM = 0x58534c4d
+            elif magic == b"XSLM":  # XSLM = 0x58534c4d
                 # XFS Algorithms & Data Structures, chapter 22.2 Extent Symbolic Links
                 print("Found a log operation which has the XSLM magic number. Need to implement a parser for extent symbolic links.", file=sys.stderr)
 
@@ -785,7 +779,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
-            # if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and record_header.h_cycle > 0:  # Not needed for checking h_cycle?
             if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
                 transaction_id = record_header.h_lsn
                 self.add_transaction(transaction_id)
@@ -908,7 +901,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
                             idx += op_size
 
-    def _reuse_predicate(self, differences: dict[str, tuple[object, object]]) -> bool:
+    def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         return ("file_type" in differences) or ("generation" in differences)
 
     def _detect_delete(self, transaction_entry: EntryInfoXfs, reuse_inode: bool) -> tuple[bool, int, int]:

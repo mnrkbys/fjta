@@ -323,6 +323,7 @@ journal_block_tag3_s = Struct(
     "t_flags" / Int32ub,
     "t_blocknr_high" / Int32ub,
     "t_checksum" / Int32ub,
+    # "uuid" / Bytes(16),  # Only if JBD2_FLAG_SAME_UUID is not set
 )
 
 journal_block_tag_s = Struct(
@@ -330,55 +331,64 @@ journal_block_tag_s = Struct(
     "t_checksum" / Int16ub,
     "t_flags" / Int16ub,
     "t_blocknr_high" / Int32ub,
+    # "uuid" / Bytes(16), # Only if JBD2_FLAG_SAME_UUID is not set
 )
 
 # Tail of a descriptor or revoke block
 jbd2_journal_block_tail = Struct(
-    "t_checksum" / Int32ub,
+    "t_checksum" / Int32ub,  # Checksum (crc32c) over the descriptor / revoke block tail
 )
 
-jdb2_journal_revoke_header = Struct(
+# Revoke block header
+jbd2_journal_revoke_header = Struct(
     "r_header" / journal_header_s,  # Common block header
     "r_count" / Int32ub,  # Number of bytes used in this block
 )
 
-# Definitions for the journal tag flags field (t_flags)
-JBD2_FLAG_ESCAPE = 1  # on-disk block is escaped
-JBD2_FLAG_SAME_UUID = 2  # block has same uuid as previous
-JBD2_FLAG_DELETED = 4  # block deleted by this transaction
-JBD2_FLAG_LAST_TAG = 8  # last tag in this descriptor block
+# Journal tag flags (t_flags)
+JBD2_FLAG_ESCAPE = 1  # On-disk block is escaped. The first four bytes of the data block just happened to match the jbd2 magic number.
+JBD2_FLAG_SAME_UUID = 2  # This block has the same UUID as previous, therefore the UUID field is omitted.
+JBD2_FLAG_DELETED = 4  # The data block was deleted by the transaction. (Not used?)
+JBD2_FLAG_LAST_TAG = 8  # This is the last tag in this descriptor block.
 
 journal_superblock_s = Struct(
-    "s_header" / journal_header_s,
-    "s_blocksize" / Int32ub,
-    "s_maxlen" / Int32ub,
-    "s_first" / Int32ub,
-    "s_sequence" / Int32ub,
-    "s_start" / Int32ub,
-    "s_errno" / Int32ub,
-    "s_feature_compat" / Int32ub,
-    "s_feature_incompat" / Int32ub,
-    "s_feature_ro_compat" / Int32ub,
-    "s_uuid" / Bytes(16),
-    "s_nr_users" / Int32ub,
-    "s_dynsuper" / Int32ub,
-    "s_max_transaction" / Int32ub,
-    "s_max_trans_data" / Int32ub,
-    "s_checksum_type" / Int8ub,
-    "s_padding2" / Padding(3),
-    "s_padding" / Padding(4 * 42),
-    "s_checksum" / Int32ub,
-    "s_users" / Array(48, Bytes(16)),
+    # Static information describing the journal.
+    "s_header" / journal_header_s,  # 0x00: Common header identifying this as a superblock.
+    "s_blocksize" / Int32ub,  # 0x0C: Journal device block size.
+    "s_maxlen" / Int32ub,  # 0x10: Total number of blocks in this journal.
+    "s_first" / Int32ub,  # 0x14: First block of log information.
+    # Dynamic information describing the current state of the log.
+    "s_sequence" / Int32ub,  # 0x18: First commit ID expected in log.
+    "s_start"
+    / Int32ub,  # 0x1C: Block number of the start of log. Contrary to the comments, this field being zero does not imply that the journal is clean!
+    "s_errno" / Int32ub,  # 0x20: Error value, as set by jbd2_journal_abort().
+    # The remaining fields are only valid in a v2 superblock.
+    "s_feature_compat" / Int32ub,  # 0x24: Compatible feature set. See the table jbd2_compat below.
+    "s_feature_incompat" / Int32ub,  # 0x28: Incompatible feature set. See the table jbd2_incompat below.
+    "s_feature_ro_compat" / Int32ub,  # 0x2C: Read-only compatible feature set. There aren't any of these currently.
+    "s_uuid" / Bytes(16),  # 0x30: 128-bit uuid for journal. This is compared against the copy in the ext4 super block at mount time.
+    "s_nr_users" / Int32ub,  # 0x40: Number of file systems sharing this journal.
+    "s_dynsuper" / Int32ub,  # 0x44: Location of dynamic super block copy. (Not used?)
+    "s_max_transaction" / Int32ub,  # 0x48: Limit of journal blocks per transaction. (Not used?)
+    "s_max_trans_data" / Int32ub,  # 0x4C: Limit of data blocks per transaction. (Not used?)
+    "s_checksum_type" / Int8ub,  # 0x50: Checksum algorithm used for the journal. See jbd2_checksum_type for more info.
+    "s_padding2" / Padding(3),  # 0x51: Padding.
+    "s_num_fc_blocks" / Int32ub,  # 0x54: Number of fast commit blocks in the journal.
+    "s_head" / Int32ub,  # 0x58: Block number of the head (first unused block) of the journal, only up-to-date when the journal is empty.
+    "s_padding" / Padding(4 * 40),  # 0x5C: Padding.
+    "s_checksum" / Int32ub,  # 0xFC: Checksum of the entire superblock, with this field set to zero.
+    "s_users" / Array(48, Bytes(16)),  # 0x100: ids of all file systems sharing the log.
 )
 
-JBD2_FEATURE_COMPAT_CHECKSUM = 0x00000001
+# Feature flags
+JBD2_FEATURE_COMPAT_CHECKSUM = 0x00000001  # Journal maintains checksums on the data blocks.
 
-JBD2_FEATURE_INCOMPAT_REVOKE = 0x00000001
-JBD2_FEATURE_INCOMPAT_64BIT = 0x00000002
-JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT = 0x00000004
-JBD2_FEATURE_INCOMPAT_CSUM_V2 = 0x00000008
-JBD2_FEATURE_INCOMPAT_CSUM_V3 = 0x00000010
-JBD2_FEATURE_INCOMPAT_FAST_COMMIT = 0x00000020
+JBD2_FEATURE_INCOMPAT_REVOKE = 0x00000001  # Journal has block revocation records.
+JBD2_FEATURE_INCOMPAT_64BIT = 0x00000002  # Journal can deal with 64-bit block numbers.
+JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT = 0x00000004  # Journal commits asynchronously.
+JBD2_FEATURE_INCOMPAT_CSUM_V2 = 0x00000008  # This journal uses v2 of the checksum on-disk format. Each journal metadata block gets its own checksum, and the block tags in the descriptor table contain checksums for each of the data blocks in the journal.
+JBD2_FEATURE_INCOMPAT_CSUM_V3 = 0x00000010  # This journal uses v3 of the checksum on-disk format. This is the same as v2, but the journal block tag size is fixed regardless of the size of block numbers.
+JBD2_FEATURE_INCOMPAT_FAST_COMMIT = 0x00000020  # Journal has fast commit blocks.
 
 
 #

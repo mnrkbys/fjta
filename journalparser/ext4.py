@@ -38,6 +38,7 @@ from journalparser.common import (
     DeviceNumber,
     EntryInfo,
     EntryInfoSource,
+    EntryInfoTypes,
     ExtendedAttribute,
     FileTypes,
     FsTypes,
@@ -338,11 +339,13 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         while idx <= len(data) - tag_size:
             tag_data = data[idx : idx + tag_size]
             idx += tag_size
-            if tag_data == b"\x00" * tag_size:  # Skip empty tag
-                continue
+            # if tag_data == b"\x00" * tag_size:  # Skip empty tag
+            #     continue
 
             tag = journal_block_tag.parse(tag_data)
             tags.append(tag)
+            if not (tag.t_flags & ext4_structs.JBD2_FLAG_SAME_UUID):
+                idx += 16  # Skip uuid (16 bytes)
             if tag.t_flags & ext4_structs.JBD2_FLAG_LAST_TAG:
                 break
 
@@ -603,7 +606,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     # ext4 inode does not have a field for managing file generations like XFS's di_gen field.
     # ext4's l_i_version field is not equivalent to XFS's di_gen field.
     # If the last timeline event of the inode can be checked and its action is DELETE_INODE, the inode in this transaction is considered a reuse.
-    def _reuse_predicate(self, differences: dict[str, tuple[object, object]]) -> bool:
+    def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         return "file_type" in differences
 
     def _detect_delete(self, transaction_entry: EntryInfoExt4, reuse_inode: bool) -> tuple[bool, int, int]:

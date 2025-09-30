@@ -395,7 +395,7 @@ JBD2_FEATURE_INCOMPAT_FAST_COMMIT = 0x00000020  # Journal has fast commit blocks
 # inode structures
 #
 i_osd1_linux = Struct(
-    "l_i_version" / Int32ub,
+    "l_i_version" / Int32ul,
 )
 
 i_osd2_linux = Struct(

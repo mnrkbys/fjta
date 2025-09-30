@@ -110,6 +110,7 @@ class JournalTransactionXfs(JournalTransaction):
     record_len: int = 0
     record_format: int = 0
     trans_state = TransState.UNKNOWN
+    tid_real: int = 0
 
     @staticmethod
     def _convert_to_epoch(seconds: int) -> int:
@@ -136,7 +137,7 @@ class JournalTransactionXfs(JournalTransaction):
         entry = self.entries[inode_num]
         entry.inode = inode_num
         if special_inodes.get(inode_num):
-            entry.names.update({128: [special_inodes[inode_num]]})
+            entry.names[128] = [special_inodes[inode_num]]
             if not self.dents.get(128):
                 self.dents[128] = DentInfo(dir_inode=128, parent_inode=128)
             if not self.dents[128].block_entries.get(block_num):
@@ -242,7 +243,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         return 0
 
     def _create_transaction(self, tid: int) -> JournalTransactionXfs:
-        return JournalTransactionXfs(tid)
+        return JournalTransactionXfs(tid=tid)
 
     def _parse_xfs_superblock(self) -> None:
         self.xfs_superblock = xfs_dsb.parse(self.read_data(self.offset + 0x0, 0x200))
@@ -264,7 +265,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         while addr < end:
             data = self.read_data(self.offset + addr, xfs_structs.xlog_rec_header.sizeof())
             hdr = xlog_rec_header.parse(data)
-            if hdr.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
+            if hdr.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and hdr.h_cycle > 0x0:
                 self.dbg_print(f"First log record: {addr}")
                 return addr
             # addr += 4
@@ -308,7 +309,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             if (
                 op_header.oh_tid == tid
                 and op_header.oh_len <= len(data) - idx - xlog_op_header.sizeof()
-                and (op_header.oh_clientid in (0, xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG))
+                and (op_header.oh_clientid in (xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG))
                 and (op_header.oh_flags == 0 or op_header.oh_flags & xfs_structs.XLOG_OPERATION_FLAGS_ALL)
             ):
                 self.dbg_print(f"_find_next_xlog_op_header found xlog_op_header: {op_header}")
@@ -329,7 +330,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         self.dbg_print(f"_restore_cycle_data replaced data: {data}")
         return tmp_data
 
-    def _parse_log_operations(self, data: bytes, cycle_data: list[int]) -> list[XfsLogOperation]:
+    def _parse_log_operations(self, data: bytes, cycle_data: list[int]) -> tuple[int, list[XfsLogOperation]]:
         idx = 0
         tid = 0
         log_ops: list[XfsLogOperation] = []
@@ -354,7 +355,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     and op_header.oh_flags == xfs_structs.XLOG_UNMOUNT_TRANS
                 ):
                     log_ops.append(XfsLogOperation(op_header, b""))
-                    return log_ops
+                    return op_header.oh_tid, log_ops
 
                 # The transaction ID does not change within a log record.
                 # So, if a different transaction ID appears, we need to guess the correct length of the log item.
@@ -365,18 +366,17 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
                 if (
                     op_header.oh_tid != tid
-                    or op_header.oh_clientid not in (0, xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG)
+                    or op_header.oh_clientid not in (xfs_structs.XFS_TRANSACTION, xfs_structs.XFS_VOLUME, xfs_structs.XFS_LOG)
                     or not (op_header.oh_flags == 0 or op_header.oh_flags & xfs_structs.XLOG_OPERATION_FLAGS_ALL)
-                ):
-                    if next_op_header := self._find_next_xlog_op_header(tid, data[idx:]):
-                        self.dbg_print(f"Found next xlog_op_header (next_op_header): {next_op_header}")
-                        log_ops[-1].op_header.oh_len += next_op_header
-                        log_ops[-1].item_data += data[idx : idx + next_op_header]
-                        self.dbg_print(f"_parse_log_operations updated log_ops[-1].op_header: {log_ops[-1].op_header}")
-                        self.dbg_print(f"_parse_log_operations updated log_ops[-1].item_data: {log_ops[-1].item_data}")
-                        idx += next_op_header
-                        op_header = xlog_op_header.parse(data[idx : idx + xlog_op_header.sizeof()])
-                        self.dbg_print(f"_parse_log_operations updated op_header: {op_header}")
+                ) and (next_op_header := self._find_next_xlog_op_header(tid, data[idx:])):
+                    self.dbg_print(f"Found next xlog_op_header (next_op_header): {next_op_header}")
+                    log_ops[-1].op_header.oh_len += next_op_header
+                    log_ops[-1].item_data += data[idx : idx + next_op_header]
+                    self.dbg_print(f"_parse_log_operations updated log_ops[-1].op_header: {log_ops[-1].op_header}")
+                    self.dbg_print(f"_parse_log_operations updated log_ops[-1].item_data: {log_ops[-1].item_data}")
+                    idx += next_op_header
+                    op_header = xlog_op_header.parse(data[idx : idx + xlog_op_header.sizeof()])
+                    self.dbg_print(f"_parse_log_operations updated op_header: {op_header}")
 
                 item_data = data[idx + xlog_op_header.sizeof() : idx + xlog_op_header.sizeof() + op_header.oh_len]
                 self.dbg_print(f"_parse_log_operations item_data: {item_data}")
@@ -390,7 +390,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     f"Failed to parse xlog_op_header: data[{idx}:{idx + xlog_op_header.sizeof()}]: {data[idx : idx + xlog_op_header.sizeof()]}",
                 )
                 break
-        return log_ops
+        return tid, log_ops
 
     def _brute_force_xfs_dir2_sf_entry(self, data: bytes) -> Container | None:
         namelen = 1
@@ -520,7 +520,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         old_idx = 0
         while len(log_ops) >= inode_log_format_64.ilf_size and idx < inode_log_format_64.ilf_size:
             if idx == old_idx:
-                print(f"inode_log_format_64.ilf_fields contains unprocessable values: 0x{inode_log_format_64.ilf_fields:x}")
+                print(f"inode_log_format_64.ilf_fields contains unprocessable values: 0x{inode_log_format_64.ilf_fields:x}", file=sys.stderr)
                 self.dbg_print(f"_parse_inode_update inode_log_format_64.ilf_fields: {inode_log_format_64.ilf_fields}")
                 sys.exit(1)
             old_idx = idx
@@ -689,9 +689,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             self.dbg_print("_parse_buffer_writes Exception StreamError")
 
     def _retrieve_log_ops(self, log_item: Container, log_ops: list[XfsLogOperation]) -> tuple[bool, list[XfsLogOperation]]:
+        idx = 0
+        tmp_log_ops: list[XfsLogOperation] = []
         try:
-            idx = 0
-            tmp_log_ops: list[XfsLogOperation] = []
             self.dbg_print(f"_retrieve_log_ops log_ops: {log_ops}")
             if not self.incomplete_log_ops and log_item.magic in (xfs_structs.XFS_LI_INODE, xfs_structs.XFS_LI_BUF):  # 0x123B or 0x123C
                 for i in range(log_item.size):
@@ -707,9 +707,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             if len(tmp_log_ops) == log_item.size:
                 self.incomplete_log_ops = []
                 return True, tmp_log_ops
-        except IndexError:
-            self.dbg_print(f"_retrieve_log_ops IndexError: {log_ops}")
-            return False, log_ops
+        except IndexError as err:
+            self.dbg_print(f"_retrieve_log_ops IndexError: {err}")
+            self.incomplete_log_ops = tmp_log_ops
+            return False, tmp_log_ops
         else:
             return False, tmp_log_ops
 
@@ -731,19 +732,24 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                         break
                     idx += 1
 
-            tmp_log_ops[-1] = XfsLogOperation(tmp_log_ops[-1].op_header, tmp_data)
-            tmp_log_ops[-1].op_header.oh_len = len(tmp_log_ops[-1].item_data)
-            tmp_log_ops[-1].op_header.oh_flags |= log_ops[0].op_header.oh_flags
-            # Clear oh_flags
-            op_flags = tmp_log_ops[-1].op_header.oh_flags
-            for f in (xfs_structs.XLOG_CONTINUE_TRANS, xfs_structs.XLOG_WAS_CONT_TRANS, xfs_structs.XLOG_END_TRANS):
-                if op_flags & f:
-                    op_flags &= ~f
-            tmp_log_ops[-1].op_header.oh_flags = op_flags
-            tmp_log_ops.extend(log_ops[idx + 1 :])
-            self.incomplete_log_ops = []
-            self.dbg_print(f"_concatenate_log_ops concatenated log_ops: {tmp_log_ops}")
-            return tmp_log_ops
+                tmp_log_ops[-1] = XfsLogOperation(tmp_log_ops[-1].op_header, tmp_data)
+                tmp_log_ops[-1].op_header.oh_len = len(tmp_log_ops[-1].item_data)
+                tmp_log_ops[-1].op_header.oh_flags |= log_ops[0].op_header.oh_flags
+                # Clear oh_flags
+                op_flags = tmp_log_ops[-1].op_header.oh_flags
+                for f in (xfs_structs.XLOG_CONTINUE_TRANS, xfs_structs.XLOG_WAS_CONT_TRANS, xfs_structs.XLOG_END_TRANS):
+                    if op_flags & f:
+                        op_flags &= ~f
+                tmp_log_ops[-1].op_header.oh_flags = op_flags
+                tmp_log_ops.extend(log_ops[idx + 1 :])
+                self.incomplete_log_ops = []
+                self.dbg_print(f"_concatenate_log_ops concatenated log_ops: {tmp_log_ops}")
+                return tmp_log_ops
+
+            if tmp_log_ops[-1].op_header.oh_flags == 0:
+                tmp_log_ops.extend(log_ops)
+                self.incomplete_log_ops = []
+                return tmp_log_ops
 
         return log_ops
 
@@ -763,15 +769,14 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
-            if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
+            if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and record_header.h_cycle > 0x0:
                 if record_header.h_len >= xfs_structs.XLOG_HEADER_CYCLE_SIZE:
-                    print("parse_journal xlog_rec_header.h_len is large: {record_header.h_len}", file=sys.stderr)
+                    print(f"parse_journal xlog_rec_header.h_len is large: {record_header.h_len}", file=sys.stderr)
                     print("A parser for xlog_rec_ext_header structure might be needed.", file=sys.stderr)
                     print(f"journal_addr: {journal_addr}", file=sys.stderr)
                     print(f"record_header: {record_header}", file=sys.stderr)
                 log_records[record_header.h_lsn] = journal_addr
-                journal_addr += record_header.h_len
-            journal_addr += 0x200  # record header size is 0x200
+            journal_addr += 0x200 + record_header.h_len  # record header size is 0x200
 
         sorted_log_records = dict(sorted(log_records.items()))  # Sort log records by h_lsn
 
@@ -787,7 +792,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 transaction.record_format = record_header.h_fmt
                 journal_addr += 0x200  # record header size is 0x200
                 data = self._read_journal_data(journal_addr, record_header.h_len)
-                log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
+                tid_real, log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
+                transaction.tid_real = tid_real
                 self.dbg_print(f"Number of log operations: record_header.h_num_logops = {record_header.h_num_logops}, log_ops = {len(log_ops)}")
                 if len(log_ops) == record_header.h_num_logops:
                     self.dbg_print("All log operations are found.")
@@ -907,7 +913,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
     def _detect_delete(self, transaction_entry: EntryInfoXfs, reuse_inode: bool) -> tuple[bool, int, int]:
         if (
             transaction_entry.file_type == FileTypes.UNKNOWN
-            and transaction_entry.mode in (0, 0x200)
+            and transaction_entry.mode == 0
             # and transaction_entry.size == 0  # In many cases, size is 0 for deleted inodes. But not always.
             and transaction_entry.link_count == 0
             and reuse_inode
@@ -1006,7 +1012,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     if action != Actions.UNKNOWN:
                         timeline_events.append(
                             TimelineEventInfo(
-                                transaction_id=tid,
+                                # transaction_id=tid,
+                                transaction_id=transaction.tid_real,
                                 inode=inode_num,
                                 file_type=transaction_entry.file_type,
                                 names=transaction_entry.names,

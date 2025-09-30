@@ -249,12 +249,13 @@ class JournalTransaction[T: EntryInfo]:
         msg = "Subclasses must implement set_dent_info."
         raise NotImplementedError(msg)
 
-    def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
-        names: dict[int, list[str]] = {}
-        for dir_inode, dir_entries in self.dents.items():
-            if tmp_names := dir_entries.find_names_by_inodenum(inode_num):
-                names.update({dir_inode: tmp_names})
-        return names
+    # def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
+    #     names: dict[int, list[str]] = {}
+    #     for dir_inode, dir_entries in self.dents.items():
+    #         if tmp_names := dir_entries.find_names_by_inodenum(inode_num):
+    #             # names.update({dir_inode: tmp_names})
+    #             names[dir_inode] = tmp_names
+    #     return names
 
 
 @dataclass
@@ -340,15 +341,15 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         raise NotImplementedError(msg)
 
     @staticmethod
-    def _compare_entry_fields(current_entry: U, new_entry: U) -> list[tuple[str, EntryInfoTypes, EntryInfoTypes]]:
-        differences: list[tuple] = []
+    def _compare_entry_fields(current_entry: U, new_entry: U) -> dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]:
+        differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]] = {}
         for entry_field in current_entry.__dataclass_fields__:
             if entry_field in ("entryinfo_source",):
                 continue
             current_value = getattr(current_entry, entry_field)
             new_value = getattr(new_entry, entry_field)
             if current_value != new_value:
-                differences.append((entry_field, current_value, new_value))
+                differences[entry_field] = (current_value, new_value)
         return differences
 
     # @staticmethod
@@ -431,7 +432,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         names: dict[int, list[str]] = {}
         for dir_inode, dir_entries in self.working_dents.items():
             if tmp_names := dir_entries.find_names_by_inodenum(inode_num):
-                names.update({dir_inode: tmp_names})
+                names[dir_inode] = tmp_names
         return names
 
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
@@ -451,11 +452,11 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def _update_working_entry_fields(
         working_entry: U,
         transaction_entry: U,
-        differences: list[tuple[str, EntryInfoTypes, EntryInfoTypes]],
+        differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]],
     ) -> None:
-        for field, _, new_value in differences:
-            if field != "names":
-                setattr(working_entry, field, new_value)
+        for field_name in differences:
+            if field_name != "names":
+                setattr(working_entry, field_name, differences[field_name][1])
         working_entry.names = copy.deepcopy(transaction_entry.names)
 
     def _generate_timeline_event_common(
@@ -479,8 +480,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         crtime_f = self._to_float_ts(transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
         dtime_f = 0.0
 
-        diffs_list = self._compare_entry_fields(working_entry, transaction_entry)
-        diffs = {key: (current, new) for key, current, new in diffs_list}
+        diffs = self._compare_entry_fields(working_entry, transaction_entry)
 
         reuse_inode = self._reuse_predicate(diffs)
         if reuse_inode:
@@ -639,7 +639,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             )
 
         # Update working_entry with transaction_entry
-        self._update_working_entry_fields(working_entry, transaction_entry, diffs_list)
+        self._update_working_entry_fields(working_entry, transaction_entry, diffs)
         return timeline_event
 
     def timeline(self) -> None:

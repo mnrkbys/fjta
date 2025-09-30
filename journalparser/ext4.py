@@ -25,6 +25,7 @@ import copy
 import io
 import json
 import math
+import sys
 from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -141,7 +142,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
         entry = self.entries[inode_num]
         entry.inode = inode_num
         if special_inodes.get(inode_num):
-            entry.names.update({2: [special_inodes[inode_num]]})
+            entry.names[2] = [special_inodes[inode_num]]
             if not self.dents.get(2):
                 self.dents[2] = DentInfo(dir_inode=2, parent_inode=2)
             if not self.dents[2].block_entries.get(block_num):
@@ -236,7 +237,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         self.fstype = FsTypes.EXT4
 
     def _create_transaction(self, tid: int) -> JournalTransactionExt4:
-        return JournalTransactionExt4(tid)
+        return JournalTransactionExt4(tid=tid)
 
     def _parse_ext4_superblock(self) -> None:
         self.ext4_superblock = ext4_superblock_s.parse(self.img_info.read(self.offset + 0x400, ext4_superblock_s.sizeof()))
@@ -272,12 +273,12 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         ext4_sb = self.ext4_superblock
         inode_tables: list[BgInodeTable] = []
         enable_64bit_size_block = self.ext4_superblock.s_feature_incompat & ext4_structs.EXT4_FEATURE_INCOMPAT_64BIT
+        inode_table_len = math.ceil(ext4_sb.s_inodes_per_group * ext4_sb.s_inode_size / 2 ** (10 + ext4_sb.s_log_block_size))
         for bg_desc in self.bg_descriptors:
             if enable_64bit_size_block:
                 inode_table_head = bg_desc.bg_inode_table_hi << 32 | bg_desc.bg_inode_table_lo
             else:
                 inode_table_head = bg_desc.bg_inode_table_lo
-            inode_table_len = math.ceil(ext4_sb.s_inodes_per_group * ext4_sb.s_inode_size / 2 ** (10 + ext4_sb.s_log_block_size))
             self.dbg_print(f"Block group inode table: {inode_table_head}, {inode_table_len}")
             inode_tables.append(BgInodeTable(inode_table_head, inode_table_len))
         self.inode_tables = inode_tables
@@ -328,6 +329,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     def _parse_descriptor_block_tags(self, data: bytes) -> list[Container]:
         idx = journal_header_s.sizeof()  # Skip journal header
         tags: list[Container] = []
+        found_last_tag = False
 
         if self.jbd2_feature_incompat_csum_v3:
             tag_size = journal_block_tag3_s.sizeof()
@@ -347,7 +349,11 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
             if not (tag.t_flags & ext4_structs.JBD2_FLAG_SAME_UUID):
                 idx += 16  # Skip uuid (16 bytes)
             if tag.t_flags & ext4_structs.JBD2_FLAG_LAST_TAG:
+                found_last_tag = True
                 break
+
+        if idx > len(data) - tag_size and not found_last_tag:
+            print("_parse_descriptor_block_tags JBD2_FLAG_LAST_TAG not found.", file=sys.stderr)
 
         return tags
 

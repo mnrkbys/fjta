@@ -105,6 +105,9 @@ xfs_dsb = Struct(
     "sb_rgextents" / Int32ub,  # 0x114: Maximum number of realtime extents that can be contained within a realtime group.
     "sb_rgblklog" / Int8ub,  # 0x118: log2 value of sb_rgextents * sb_rextsize (rounded up).
     "sb_pad" / Bytes(7),  # 0x119: Zeroes, if the XFS_SB_FEAT_RO_INCOMPAT_METADIR feature is enabled.
+    "sb_rtstart" / Int64ub,  # 0x120: If XFS_SB_FEAT_INCOMPAT_ZONED is enabled, start of the internal realtime (RT) section (offset in fsblocks).
+    "sb_rtreserved"
+    / Int64ub,  # 0x128: If XFS_SB_FEAT_INCOMPAT_ZONED is enabled, amount of RT space reserved for internal GC/reorganization (fsblocks).
 )
 
 

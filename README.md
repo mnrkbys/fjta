@@ -18,16 +18,17 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 |----------------------------------------|:------:|:-----:|
 | inode                                  | ✅     | ✅    |
 | Directories with few entries           | ✅     | ✅    |
-| Directories with many entries          | ✅     | ✅    |
+| Directories with many entries          | ✅[^1] | ✅    |
 | Short symlink target names             | ✅     | ✅    |
-| Long symlink target names[^1]          | ✅     | ❌    |
+| Long symlink target names[^2]          | ✅     | ❌    |
 | Short extended attributes              | ✅     | ✅    |
-| Long extended attributes[^2]           | ✅     | ❌    |
+| Long extended attributes[^3]           | ✅     | ❌    |
 | Non-regular files (e.g. block devices) | ✅     | ✅    |
 | Year 2038 problem                      | ✅     | ✅    |
 
-[^1]: Symlink target names stored outside the inode.
-[^2]: Extended attributes stored outside the inode.
+[^1]: Currently, only linear directories can be parsed. Support for hash tree directories will be added in future versions.
+[^2]: Symlink target names stored outside the inode.
+[^3]: Extended attributes stored outside the inode.
 
 ## Detectable Activities
 
@@ -37,9 +38,9 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Deleting files                        | ✅     | ✅    |
 | Modification of extended attributes   | ✅     | ✅    |
 | Timestomping (timestamp manipulation) | ✅     | ✅    |
-| Other inode metadata changes[^3]      | ✅     | ✅    |
+| Other inode metadata changes[^4]      | ✅     | ✅    |
 
-[^3]: "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
+[^4]: "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
 
 ## Requirements
 

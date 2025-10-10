@@ -790,8 +790,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 transaction = self.transactions[transaction_id]
                 transaction.record_len = record_header.h_len
                 transaction.record_format = record_header.h_fmt
-                journal_addr += 0x200  # record header size is 0x200
-                data = self._read_journal_data(journal_addr, record_header.h_len)
+                data = self._read_journal_data(journal_addr + 0x200, record_header.h_len)  # record header size is 0x200
                 tid_real, log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
                 transaction.tid_real = tid_real
                 self.dbg_print(f"Number of log operations: record_header.h_num_logops = {record_header.h_num_logops}, log_ops = {len(log_ops)}")
@@ -960,51 +959,59 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
                     transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
-                    # Create inode
-                    # - Creation of files in a directory updates the directory's ctime and mtime,
-                    #   so a directory created almost simultaneously with a large number of files may not be detected.
-                    #   Under the following conditions, differences of less than 1 second are ignored.
-                    # - In some cases, such as creating symlinks, only atime is updated. So, it is removed from the condition.
-                    if transaction_entry.crtime != 0 and transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
-                        action |= Actions.CREATE_INODE
-                        msg = self.format_timestamp(
-                            transaction_entry.crtime,
-                            transaction_entry.crtime_nanoseconds,
-                            label="Crtime",
-                            follow=False,
-                        )
-                        info = self._append_msg(info, msg)
+                    is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, False)
+                    if is_delete:
+                        action |= Actions.DELETE_INODE
+                        info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
+                        dtime_f = self._to_float_ts(d_sec, d_nsec)
+                        self._refresh_directory_entries(inode_num, transaction)
 
-                    # Create hard link
-                    if action & Actions.CREATE_INODE:
-                        action |= Actions.CREATE_HARDLINK
-                        if transaction_entry.link_count > 0:
-                            info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
-
-                    for mac_type, mac_ts, act, label in (
-                        ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
-                        ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
-                        ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
-                    ):
-                        if self._timestomp((transaction_entry.crtime, transaction_entry.crtime_nanoseconds), mac_ts):
-                            action |= act | Actions.TIMESTOMP
+                    if not (action & Actions.DELETE_INODE):
+                        # Create inode
+                        # - Creation of files in a directory updates the directory's ctime and mtime,
+                        #   so a directory created almost simultaneously with a large number of files may not be detected.
+                        #   Under the following conditions, differences of less than 1 second are ignored.
+                        # - In some cases, such as creating symlinks, only atime is updated. So, it is removed from the condition.
+                        if transaction_entry.crtime != 0 and transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
+                            action |= Actions.CREATE_INODE
                             msg = self.format_timestamp(
-                                mac_ts[0],
-                                mac_ts[1],
-                                label=label,
+                                transaction_entry.crtime,
+                                transaction_entry.crtime_nanoseconds,
+                                label="Crtime",
                                 follow=False,
                             )
-                            msg += f" (Timestomp: {mac_type} < crtime)"
                             info = self._append_msg(info, msg)
 
-                    # Set flags
-                    if transaction_entry.flags & (
-                        xfs_structs.XFS_DIFLAG_IMMUTABLE | xfs_structs.XFS_DIFLAG_NOATIME | xfs_structs.XFS_DIFLAG_PREALLOC
-                    ):
-                        action |= Actions.CHANGE_FLAGS
-                        info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
-                        if add_info := self._apply_flag_changes(transaction_entry.flags):
-                            info = self._append_msg(info, add_info, " ")
+                        # Create hard link
+                        if action & Actions.CREATE_INODE:
+                            action |= Actions.CREATE_HARDLINK
+                            if transaction_entry.link_count > 0:
+                                info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
+
+                        for mac_type, mac_ts, act, label in (
+                            ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
+                            ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
+                            ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
+                        ):
+                            if self._timestomp((transaction_entry.crtime, transaction_entry.crtime_nanoseconds), mac_ts):
+                                action |= act | Actions.TIMESTOMP
+                                msg = self.format_timestamp(
+                                    mac_ts[0],
+                                    mac_ts[1],
+                                    label=label,
+                                    follow=False,
+                                )
+                                msg += f" (Timestomp: {mac_type} < crtime)"
+                                info = self._append_msg(info, msg)
+
+                        # Set flags
+                        if transaction_entry.flags & (
+                            xfs_structs.XFS_DIFLAG_IMMUTABLE | xfs_structs.XFS_DIFLAG_NOATIME | xfs_structs.XFS_DIFLAG_PREALLOC
+                        ):
+                            action |= Actions.CHANGE_FLAGS
+                            info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
+                            if add_info := self._apply_flag_changes(transaction_entry.flags):
+                                info = self._append_msg(info, add_info, " ")
 
                     # Update working_entry with transaction_entry
                     working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)

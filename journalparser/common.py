@@ -486,12 +486,13 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         if reuse_inode:
             self._refresh_directory_entries(inode_num, transaction)
 
-        is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode)
-        if is_delete:
-            action |= Actions.DELETE_INODE
-            info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
-            dtime_f = self._to_float_ts(d_sec, d_nsec)
-            self._refresh_directory_entries(inode_num, transaction)
+        if "atime" in diffs or "ctime" in diffs or "mtime" in diffs:
+            is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode)
+            if is_delete:
+                action |= Actions.DELETE_INODE
+                info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
+                dtime_f = self._to_float_ts(d_sec, d_nsec)
+                self._refresh_directory_entries(inode_num, transaction)
 
         # refresh names from current working dents
         transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)

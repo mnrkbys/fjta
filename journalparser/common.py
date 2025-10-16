@@ -5,7 +5,6 @@
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
 #
 
-
 import copy
 import io
 import os
@@ -21,6 +20,8 @@ import pytsk3
 import pyvhdi
 import pyvmdk
 from construct import Container, StreamError
+from tqdm import tqdm as _tqdm
+from tqdm.std import tqdm as TqdmType
 
 
 class FsTypes(IntEnum):
@@ -164,6 +165,7 @@ class DeviceNumber:
     def to_dict(self) -> dict:
         return {"major": self.major, "minor": self.minor}
 
+
 @dataclass
 class ExtendedAttribute:
     name: str = ""
@@ -229,7 +231,9 @@ class EntryInfo:
     device_number: DeviceNumber = field(default_factory=DeviceNumber)
     entryinfo_source: EntryInfoSource = EntryInfoSource.UNKNOWN
 
+
 EntryInfoTypes = int | str | FileTypes | list[ExtendedAttribute] | DeviceNumber | EntryInfoSource
+
 
 @dataclass
 class JournalTransaction[T: EntryInfo]:
@@ -306,6 +310,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self.offset = args.offset
         self.debug = args.debug
         self.special_inodes = args.special_inodes
+        self.no_progress = args.no_progress
         # self.endian = self.fs_info.info.endian  # 1 = pytsk3.TSK_LIT_ENDIAN, 2 = pytsk3.TSK_BIG_ENDIAN
         self.block_size = 0
         self.journal_file = None  # Used in ext4
@@ -318,6 +323,11 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
             print(msg)
+
+    def tqdm(self, *args, **kwargs) -> TqdmType:
+        if "disable" not in kwargs:
+            kwargs["disable"] = self.no_progress
+        return _tqdm(*args, **kwargs)
 
     def read_data(self, address: int, size: int) -> bytes:
         if isinstance(self.img_info, ImageLike):

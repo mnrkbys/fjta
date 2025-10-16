@@ -60,6 +60,11 @@ def parse_arguments() -> argparse.Namespace:
         help="Include special inodes in the timeline. (Default: False)",
     )
     parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Hide progress bars. (Default: False)",
+    )
+    parser.add_argument(
         "-v",
         "--version",
         action="version",

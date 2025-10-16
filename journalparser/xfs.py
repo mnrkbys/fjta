@@ -765,6 +765,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         journal_addr = first_log_rec_addr
 
         # Find all log records and sort by h_lsn.
+        pbar = self.tqdm(total=self.xfs_superblock.sb_logblocks * self.block_size, desc="Finding log records", unit="B", unit_scale=True, leave=False)
         while journal_addr < first_log_rec_addr + self.xfs_superblock.sb_logblocks * self.block_size:
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
@@ -777,15 +778,17 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     print(f"record_header: {record_header}", file=sys.stderr)
                 log_records[record_header.h_lsn] = journal_addr
             journal_addr += 0x200 + record_header.h_len  # record header size is 0x200
+            pbar.update(0x200 + record_header.h_len)
+        pbar.close()
 
         sorted_log_records = dict(sorted(log_records.items()))  # Sort log records by h_lsn
 
-        for journal_addr in sorted_log_records.values():
+        for journal_addr in self.tqdm(sorted_log_records.values(), desc="Parsing log records", unit="log record", leave=False):
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
             if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
-                transaction_id = record_header.h_lsn
+                transaction_id = record_header.h_lsn  # Actually, this is not transaction ID, but using h_lsn as a substitute.
                 self.add_transaction(transaction_id)
                 transaction = self.transactions[transaction_id]
                 transaction.record_len = record_header.h_len
@@ -825,6 +828,12 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
                     idx = 0
                     if xfs_trans_header and xfs_log_item:
+                        pbar_log_op = self.tqdm(
+                            total=len(log_ops),
+                            desc=f"Parsing log operations (LSN {transaction_id})",
+                            unit="log operation",
+                            leave=False,
+                        )
                         self.dbg_print(f"parse_journal log_ops: {log_ops}")
                         while idx < len(log_ops):
                             self.dbg_print(f"parse_journal log_ops[{idx}]: {log_ops[idx]}")
@@ -905,6 +914,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                                             self.dbg_print(f"log_op.item_data[:0x100]: {log_op.item_data[:0x100]}")
 
                             idx += op_size
+                            pbar_log_op.update(op_size)
+                        pbar_log_op.close()
 
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         return ("file_type" in differences) or ("generation" in differences)
@@ -936,11 +947,11 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
     def timeline(self) -> None:
         working_entries: dict[int, EntryInfoXfs] = {}
         timeline_events: list[TimelineEventInfo] = []
-        for tid in sorted(self.transactions):
+        for tid in self.tqdm(sorted(self.transactions), desc="Generating timeline", unit="transaction", leave=False):
             transaction = self.transactions[tid]
             self.update_directory_entries(transaction)
 
-            for inode_num in transaction.entries:
+            for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (LSN {tid})", unit="entry", leave=False):
                 # Skip special inodes except the root inode
                 # The root inode number is 128 and it is hanled as a normal inode here.
                 if not self.special_inodes and inode_num < 128:

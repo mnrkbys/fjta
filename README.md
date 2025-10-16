@@ -54,6 +54,7 @@ Tested with the following software and libraries:
 - [libewf-python](https://pypi.org/project/libewf-python/) 20240506
 - [libvmdk-python](https://pypi.org/project/libvmdk-python/) 20240510
 - [libvhdi-python](https://pypi.org/project/libvhdi-python/) 20240509
+- [tqdm](https://github.com/tqdm/tqdm) 4.67.1
 
 ## Installation From Source
 

@@ -488,6 +488,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         block_num = first_desc_block
 
         # Find all transactions in the journal and sort by h_sequence.
+        pbar = self.tqdm(total=journal_sb.s_maxlen - journal_sb.s_first, desc="Finding transactions", unit="block", leave=False)
         found_descriptor_block = False
         while block_num < first_desc_block + journal_sb.s_maxlen - journal_sb.s_first:
             try:
@@ -504,11 +505,12 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 pass
             finally:
                 block_num += 1
+                pbar.update(1)
+        pbar.close()
 
         sorted_journal_blocks = dict(sorted(journal_blocks.items()))
 
-        # while block_num < first_desc_block + journal_sb.s_maxlen - journal_sb.s_first:
-        for block_num in sorted_journal_blocks.values():
+        for block_num in self.tqdm(sorted_journal_blocks.values(), desc="Parsing transactions", unit="transaction", leave=False):
             while True:
                 try:
                     data = self._read_journal_block(block_num)
@@ -524,7 +526,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                             transaction = self.transactions[transaction_id]
                             tags = self._parse_descriptor_block_tags(data)
                             if tags:
-                                for tag in tags:
+                                for tag in self.tqdm(tags, desc="Parsing block tags", unit="tag", leave=False):
                                     self.dbg_print(f"Block tag: {tag}")
                                     if self.jbd2_feature_incompat_64bit:
                                         t_blocknr = tag.t_blocknr_high << 32 | tag.t_blocknr
@@ -637,12 +639,12 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     def timeline(self) -> None:
         working_entries: dict[int, EntryInfoExt4] = {}
         timeline_events: list[TimelineEventInfo] = []
-        for tid in sorted(self.transactions):
+        for tid in self.tqdm(sorted(self.transactions), desc="Generating timeline", unit="transaction", leave=False):
             transaction = self.transactions[tid]
             commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
             self.update_directory_entries(transaction)
 
-            for inode_num in transaction.entries:
+            for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (Transaction {tid})", unit="entry", leave=False):
                 # Skip special inodes except the root inode
                 # The root inode number is 2 and it is hanled as a normal inode here.
                 if not self.special_inodes and inode_num <= 11 and inode_num != 2:

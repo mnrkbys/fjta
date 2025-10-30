@@ -303,6 +303,7 @@ class TimelineEventInfo:
 
 
 class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
+    # io.BufferedReader might not be needed
     def __init__(self, img_info: ImageLike | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         self.fstype = FsTypes.UNKNOWN
         self.img_info = img_info
@@ -332,7 +333,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def read_data(self, address: int, size: int) -> bytes:
         if isinstance(self.img_info, ImageLike):
             return self.img_info.read(address, size)
-        if isinstance(self.img_info, io.BufferedReader):
+        if isinstance(self.img_info, io.BufferedReader):  # io.BufferedReader might not be needed
             self.img_info.seek(address, os.SEEK_SET)
             return self.img_info.read(size)
         raise TypeError("img_info must be either pytsk3.Img_Info or io.BufferedReader.")

@@ -119,7 +119,8 @@ BBSIZE = 1 << BBSHIFT
 
 # XFS Log Record Header structure
 xlog_rec_header = Struct(
-    "h_magicno" / Int32ub,  # 0x00: The magic number of log records, 0xfeedbabe.
+    # "h_magicno" / Int32ub,  # 0x00: The magic number of log records, 0xfeedbabe.
+    "h_magicno" / Const(XLOG_HEADER_MAGIC, Int32ub),  # 0x00: The magic number of log records, 0xfeedbabe.
     "h_cycle" / Int32ub,  # 0x04: Cycle number of this log record.
     "h_version" / Int32ub,  # 0x08: Log record version, currently 2.
     "h_len" / Int32ub,  # 0x0C: Length of the log record, in bytes. Must be aligned to a 64-bit boundary.

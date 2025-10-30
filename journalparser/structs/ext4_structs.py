@@ -285,7 +285,8 @@ dx_root = Struct(
 #
 # Journal (JBD2) structures
 #
-JBD2_MAGIC_NUMBER = b"\xc0\x3b\x39\x98"
+# JBD2_MAGIC_NUMBER = b"\xc0\x3b\x39\x98"
+JBD2_MAGIC_NUMBER = 0xC03B3998
 
 # Descriptor block types
 JBD2_DESCRIPTOR_BLOCK = 1
@@ -295,7 +296,8 @@ JBD2_SUPERBLOCK_V2 = 4
 JBD2_REVOKE_BLOCK = 5
 
 journal_header_s = Struct(
-    "h_magic" / Const(JBD2_MAGIC_NUMBER),
+    # "h_magic" / Const(JBD2_MAGIC_NUMBER),
+    "h_magic" / Const(JBD2_MAGIC_NUMBER, Int32ub),
     "h_blocktype" / Int32ub,
     "h_sequence" / Int32ub,
 )

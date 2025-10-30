@@ -22,7 +22,6 @@
 # https://righteousit.com/2024/09/04/more-on-ext4-timestamps-and-timestomping/
 
 import copy
-import io
 import json
 import math
 import sys
@@ -43,6 +42,7 @@ from journalparser.common import (
     ExtendedAttribute,
     FileTypes,
     FsTypes,
+    ImageLike,
     JournalParserCommon,
     JournalTransaction,
     TimelineEventInfo,
@@ -232,7 +232,8 @@ class JournalDescriptorNotFoundError(Exception):
 
 
 class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt4]):
-    def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    # def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    def __init__(self, img_info: ImageLike, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         super().__init__(img_info, fs_info, args)
         self.fstype = FsTypes.EXT4
 

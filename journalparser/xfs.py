@@ -25,7 +25,6 @@
 # https://github.com/torvalds/linux/blob/master/include/linux/kdev_t.h
 
 import copy
-import io
 import json
 import sys
 from argparse import Namespace
@@ -35,7 +34,7 @@ from datetime import UTC, datetime
 from enum import IntEnum, auto
 
 import pytsk3
-from construct import Container, StreamError
+from construct import ConstError, Container, StreamError
 
 from journalparser.common import (
     Actions,
@@ -47,6 +46,7 @@ from journalparser.common import (
     ExtendedAttribute,
     FileTypes,
     FsTypes,
+    ImageLike,
     JournalParserCommon,
     JournalTransaction,
     TimelineEventInfo,
@@ -230,7 +230,8 @@ class LogRecordNotFoundError(Exception):
 
 
 class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs]):
-    def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    # def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    def __init__(self, img_info: ImageLike, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         super().__init__(img_info, fs_info, args)
         self.fstype = FsTypes.XFS
         self.incomplete_log_ops: list[XfsLogOperation] = []
@@ -263,11 +264,15 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         end = self.sb_logstart_addr + self.xfs_superblock.sb_logblocks * self.block_size
         addr = self.sb_logstart_addr
         while addr < end:
-            data = self.read_data(self.offset + addr, xfs_structs.xlog_rec_header.sizeof())
-            hdr = xlog_rec_header.parse(data)
-            if hdr.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and hdr.h_cycle > 0x0:
-                self.dbg_print(f"First log record: {addr}")
-                return addr
+            try:
+                data = self.read_data(self.offset + addr, xfs_structs.xlog_rec_header.sizeof())
+                hdr = xlog_rec_header.parse(data)
+                # if hdr.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and hdr.h_cycle > 0x0:
+                if hdr.h_cycle > 0x0:
+                    self.dbg_print(f"First log record: {addr}")
+                    return addr
+            except ConstError:
+                pass
             # addr += 4
             addr += 0x200  # Aligned to 0x200 ?
         return -1
@@ -767,18 +772,23 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         # Find all log records and sort by h_lsn.
         pbar = self.tqdm(total=self.xfs_superblock.sb_logblocks * self.block_size, desc="Finding log records", unit="B", unit_scale=True, leave=False)
         while journal_addr < first_log_rec_addr + self.xfs_superblock.sb_logblocks * self.block_size:
-            data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
-            record_header = xlog_rec_header.parse(data)
-            self.dbg_print(f"record_header: {record_header}")
-            if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and record_header.h_cycle > 0x0:
-                if record_header.h_len >= xfs_structs.XLOG_HEADER_CYCLE_SIZE:
-                    print(f"parse_journal xlog_rec_header.h_len is large: {record_header.h_len}", file=sys.stderr)
-                    print("A parser for xlog_rec_ext_header structure might be needed.", file=sys.stderr)
-                    print(f"journal_addr: {journal_addr}", file=sys.stderr)
-                    print(f"record_header: {record_header}", file=sys.stderr)
-                log_records[record_header.h_lsn] = journal_addr
-            journal_addr += 0x200 + record_header.h_len  # record header size is 0x200
-            pbar.update(0x200 + record_header.h_len)
+            try:
+                data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
+                record_header = xlog_rec_header.parse(data)
+                self.dbg_print(f"record_header: {record_header}")
+                # if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and record_header.h_cycle > 0x0:
+                if record_header.h_cycle > 0x0:
+                    if record_header.h_len >= xfs_structs.XLOG_HEADER_CYCLE_SIZE:
+                        print(f"parse_journal xlog_rec_header.h_len is large: {record_header.h_len}", file=sys.stderr)
+                        print("A parser for xlog_rec_ext_header structure might be needed.", file=sys.stderr)
+                        print(f"journal_addr: {journal_addr}", file=sys.stderr)
+                        print(f"record_header: {record_header}", file=sys.stderr)
+                    log_records[record_header.h_lsn] = journal_addr
+                journal_addr += 0x200 + record_header.h_len  # record header size is 0x200
+                pbar.update(0x200 + record_header.h_len)
+            except ConstError:
+                journal_addr += 0x200
+                pbar.update(0x200)
         pbar.close()
 
         sorted_log_records = dict(sorted(log_records.items()))  # Sort log records by h_lsn
@@ -787,135 +797,135 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
-            if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:
-                transaction_id = record_header.h_lsn  # Actually, this is not transaction ID, but using h_lsn as a substitute.
-                self.add_transaction(transaction_id)
-                transaction = self.transactions[transaction_id]
-                transaction.record_len = record_header.h_len
-                transaction.record_format = record_header.h_fmt
-                data = self._read_journal_data(journal_addr + 0x200, record_header.h_len)  # record header size is 0x200
-                tid_real, log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
-                transaction.tid_real = tid_real
-                self.dbg_print(f"Number of log operations: record_header.h_num_logops = {record_header.h_num_logops}, log_ops = {len(log_ops)}")
-                if len(log_ops) == record_header.h_num_logops:
-                    self.dbg_print("All log operations are found.")
-                else:
-                    self.dbg_print("Not all log operations are found.")
+            # if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:  # Not needed? journal_addr always points to a log record.
+            transaction_id = record_header.h_lsn  # Actually, this is not transaction ID, but using h_lsn as a substitute.
+            self.add_transaction(transaction_id)
+            transaction = self.transactions[transaction_id]
+            transaction.record_len = record_header.h_len
+            transaction.record_format = record_header.h_fmt
+            data = self._read_journal_data(journal_addr + 0x200, record_header.h_len)  # record header size is 0x200
+            tid_real, log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
+            transaction.tid_real = tid_real
+            self.dbg_print(f"Number of log operations: record_header.h_num_logops = {record_header.h_num_logops}, log_ops = {len(log_ops)}")
+            if len(log_ops) == record_header.h_num_logops:
+                self.dbg_print("All log operations are found.")
+            else:
+                self.dbg_print("Not all log operations are found.")
 
-                if log_ops:
-                    xfs_trans_header = xfs_log_item = None
-                    match transaction.record_format:
-                        case xfs_structs.XLOG_FMT_UNKNOWN:
-                            print("Unknown log record format does not supported.", file=sys.stderr)
-                            return
-                        case xfs_structs.XLOG_FMT_LINUX_LE:
-                            xfs_log_item = xfs_log_item_le
-                            xfs_trans_header = xfs_trans_header_le
-                            self.xfs_dinode_core = xfs_dinode_core_le
-                            self.xfs_inode_log_format_64 = xfs_inode_log_format_64_le
-                            self.xfs_buf_log_format = xfs_buf_log_format_le
-                        case xfs_structs.XLOG_FMT_LINUX_BE | xfs_structs.XLOG_FMT_IRIX_BE:
-                            xfs_log_item = xfs_log_item_be
-                            xfs_trans_header = xfs_trans_header_be
-                            self.xfs_dinode_core = xfs_dinode_core_be
-                            self.xfs_inode_log_format_64 = xfs_inode_log_format_64_be
-                            self.xfs_buf_log_format = xfs_buf_log_format_be
-                        case _:
-                            print(f"Unsupported log record format: {transaction.record_format}", file=sys.stderr)
+            if log_ops:
+                xfs_trans_header = xfs_log_item = None
+                match transaction.record_format:
+                    case xfs_structs.XLOG_FMT_UNKNOWN:
+                        print("Unknown log record format does not supported.", file=sys.stderr)
+                        return
+                    case xfs_structs.XLOG_FMT_LINUX_LE:
+                        xfs_log_item = xfs_log_item_le
+                        xfs_trans_header = xfs_trans_header_le
+                        self.xfs_dinode_core = xfs_dinode_core_le
+                        self.xfs_inode_log_format_64 = xfs_inode_log_format_64_le
+                        self.xfs_buf_log_format = xfs_buf_log_format_le
+                    case xfs_structs.XLOG_FMT_LINUX_BE | xfs_structs.XLOG_FMT_IRIX_BE:
+                        xfs_log_item = xfs_log_item_be
+                        xfs_trans_header = xfs_trans_header_be
+                        self.xfs_dinode_core = xfs_dinode_core_be
+                        self.xfs_inode_log_format_64 = xfs_inode_log_format_64_be
+                        self.xfs_buf_log_format = xfs_buf_log_format_be
+                    case _:
+                        print(f"Unsupported log record format: {transaction.record_format}", file=sys.stderr)
 
-                    # Concatenate log operations if there are incomplete log operations.
-                    log_ops = self._concatenate_log_ops(log_ops)
+                # Concatenate log operations if there are incomplete log operations.
+                log_ops = self._concatenate_log_ops(log_ops)
 
-                    idx = 0
-                    if xfs_trans_header and xfs_log_item:
-                        pbar_log_op = self.tqdm(
-                            total=len(log_ops),
-                            desc=f"Parsing log operations (LSN {transaction_id})",
-                            unit="log operation",
-                            leave=False,
-                        )
-                        self.dbg_print(f"parse_journal log_ops: {log_ops}")
-                        while idx < len(log_ops):
-                            self.dbg_print(f"parse_journal log_ops[{idx}]: {log_ops[idx]}")
-                            log_op = log_ops[idx]
-                            op_size = 1
-                            if log_op.op_header.oh_clientid == xfs_structs.XFS_TRANSACTION:  # TODO: consider to remove this line
-                                if log_op.op_header.oh_flags == 0x0 or log_op.op_header.oh_flags & (
-                                    xfs_structs.XLOG_COMMIT_TRANS
-                                    | xfs_structs.XLOG_CONTINUE_TRANS
-                                    | xfs_structs.XLOG_WAS_CONT_TRANS
-                                    | xfs_structs.XLOG_END_TRANS
-                                ):
-                                    try:
-                                        self.dbg_print(f"parse_journal log_op.item_data: {log_op.item_data}")
-                                        log_item = xfs_log_item.parse(log_op.item_data)
-                                        self.dbg_print(f"parse_journal log_item: {log_item}")
-                                    except StreamError:
-                                        self.dbg_print("parse_journal Exception StreamError")
-                                        idx += 1
-                                        continue
-                                    match log_item.magic:
-                                        case 0x414E | 0x5452:  # Little endian = "AN" | Big endian = "TR"
-                                            trans_header = xfs_trans_header.parse(log_op.item_data)
-                                            transaction.trans_state = TransState.TRANS_DESC
-                                        case xfs_structs.XFS_LI_INODE:  # 0x123B
-                                            op_size = log_item.size
-                                            result, processing_log_ops = self._retrieve_log_ops(log_item, log_ops[idx : idx + op_size])
-                                            if result:
-                                                block_num, inode, dir_entries, eattrs, symlink_target, device_number, parent_inode = (
-                                                    self._parse_inode_update(
-                                                        processing_log_ops,
-                                                    )
+                idx = 0
+                if xfs_trans_header and xfs_log_item:
+                    pbar_log_op = self.tqdm(
+                        total=len(log_ops),
+                        desc=f"Parsing log operations (LSN {transaction_id})",
+                        unit="log operation",
+                        leave=False,
+                    )
+                    self.dbg_print(f"parse_journal log_ops: {log_ops}")
+                    while idx < len(log_ops):
+                        self.dbg_print(f"parse_journal log_ops[{idx}]: {log_ops[idx]}")
+                        log_op = log_ops[idx]
+                        op_size = 1
+                        if log_op.op_header.oh_clientid == xfs_structs.XFS_TRANSACTION:  # TODO: consider to remove this line
+                            if log_op.op_header.oh_flags == 0x0 or log_op.op_header.oh_flags & (
+                                xfs_structs.XLOG_COMMIT_TRANS
+                                | xfs_structs.XLOG_CONTINUE_TRANS
+                                | xfs_structs.XLOG_WAS_CONT_TRANS
+                                | xfs_structs.XLOG_END_TRANS
+                            ):
+                                try:
+                                    self.dbg_print(f"parse_journal log_op.item_data: {log_op.item_data}")
+                                    log_item = xfs_log_item.parse(log_op.item_data)
+                                    self.dbg_print(f"parse_journal log_item: {log_item}")
+                                except StreamError:
+                                    self.dbg_print("parse_journal Exception StreamError")
+                                    idx += 1
+                                    continue
+                                match log_item.magic:
+                                    case 0x414E | 0x5452:  # Little endian = "AN" | Big endian = "TR"
+                                        trans_header = xfs_trans_header.parse(log_op.item_data)
+                                        transaction.trans_state = TransState.TRANS_DESC
+                                    case xfs_structs.XFS_LI_INODE:  # 0x123B
+                                        op_size = log_item.size
+                                        result, processing_log_ops = self._retrieve_log_ops(log_item, log_ops[idx : idx + op_size])
+                                        if result:
+                                            block_num, inode, dir_entries, eattrs, symlink_target, device_number, parent_inode = (
+                                                self._parse_inode_update(
+                                                    processing_log_ops,
                                                 )
-                                                if inode:
-                                                    self.transactions[transaction_id].set_inode_info(block_num, inode.di_ino, inode, eattrs)
-                                                    self.transactions[transaction_id].entries[inode.di_ino].symlink_target = symlink_target
-                                                    self.transactions[transaction_id].entries[inode.di_ino].device_number = device_number
-                                                    dir_inode = inode.di_ino
-                                                    if dir_entries:
-                                                        for dir_entry in dir_entries:
-                                                            transaction.set_dent_info(
-                                                                block_num,
-                                                                dir_inode,
-                                                                parent_inode,
-                                                                dir_entry.inumber,
-                                                                dir_entry,
-                                                            )
-                                                    # If dir_entries is "[]", it means the last directory entry was deleted. Only "." and ".." are left.
-                                                    # If dir_entries is "None", it means the log operations don't contain directory entries (inode_log_format_64.ilf_fields does not have xfs_structs.XFS_ILOG_DDATA flag).
-                                                    elif self.transactions[transaction_id].entries[inode.di_ino].file_type == FileTypes.DIRECTORY:
-                                                        if dir_entries == []:
-                                                            transaction.set_dent_info(block_num, dir_inode, parent_inode, 0, [])
-                                                        elif dir_entries is None:
-                                                            transaction.set_dent_info(block_num, dir_inode, parent_inode, 0, None)
-                                        case xfs_structs.XFS_LI_BUF:  # 0x123C
-                                            op_size = log_item.size
-                                            result, processing_log_ops = self._retrieve_log_ops(log_item, log_ops[idx : idx + op_size])
-                                            if result:
-                                                parent_inode = 0
-                                                self.dbg_print("Directory entry:")
-                                                for block_num, dir_inode, dir_entry in self._parse_buffer_writes(processing_log_ops):
-                                                    if dir_entry.name == b".":
-                                                        continue
-                                                    if dir_entry.name == b"..":
-                                                        parent_inode = dir_entry.inumber
-                                                        continue
-                                                    transaction.set_dent_info(block_num, dir_inode, parent_inode, dir_entry.inumber, dir_entry)
-                                        case xfs_structs.XFS_LI_ICREATE:  # 0x123F
-                                            # Implement parsing inode creation, but I have never seen this log item in journals.
-                                            transaction.trans_state = TransState.INODE_CREATION
-                                        case 0x4946:  # "IF" of "FIB3"
-                                            if log_item.size == 0x3342:  # "3B" of "FIB3"
-                                                pass
-                                            else:  # Execute pass even if log_item.size is not 0x3342 now.
-                                                pass
-                                        case _:
-                                            self.dbg_print(f"Unsupported log item magic: 0x{log_item.magic:x}")
-                                            self.dbg_print(f"log_op.item_data[:0x100]: {log_op.item_data[:0x100]}")
+                                            )
+                                            if inode:
+                                                self.transactions[transaction_id].set_inode_info(block_num, inode.di_ino, inode, eattrs)
+                                                self.transactions[transaction_id].entries[inode.di_ino].symlink_target = symlink_target
+                                                self.transactions[transaction_id].entries[inode.di_ino].device_number = device_number
+                                                dir_inode = inode.di_ino
+                                                if dir_entries:
+                                                    for dir_entry in dir_entries:
+                                                        transaction.set_dent_info(
+                                                            block_num,
+                                                            dir_inode,
+                                                            parent_inode,
+                                                            dir_entry.inumber,
+                                                            dir_entry,
+                                                        )
+                                                # If dir_entries is "[]", it means the last directory entry was deleted. Only "." and ".." are left.
+                                                # If dir_entries is "None", it means the log operations don't contain directory entries (inode_log_format_64.ilf_fields does not have xfs_structs.XFS_ILOG_DDATA flag).
+                                                elif self.transactions[transaction_id].entries[inode.di_ino].file_type == FileTypes.DIRECTORY:
+                                                    if dir_entries == []:
+                                                        transaction.set_dent_info(block_num, dir_inode, parent_inode, 0, [])
+                                                    elif dir_entries is None:
+                                                        transaction.set_dent_info(block_num, dir_inode, parent_inode, 0, None)
+                                    case xfs_structs.XFS_LI_BUF:  # 0x123C
+                                        op_size = log_item.size
+                                        result, processing_log_ops = self._retrieve_log_ops(log_item, log_ops[idx : idx + op_size])
+                                        if result:
+                                            parent_inode = 0
+                                            self.dbg_print("Directory entry:")
+                                            for block_num, dir_inode, dir_entry in self._parse_buffer_writes(processing_log_ops):
+                                                if dir_entry.name == b".":
+                                                    continue
+                                                if dir_entry.name == b"..":
+                                                    parent_inode = dir_entry.inumber
+                                                    continue
+                                                transaction.set_dent_info(block_num, dir_inode, parent_inode, dir_entry.inumber, dir_entry)
+                                    case xfs_structs.XFS_LI_ICREATE:  # 0x123F
+                                        # Implement parsing inode creation, but I have never seen this log item in journals.
+                                        transaction.trans_state = TransState.INODE_CREATION
+                                    case 0x4946:  # "IF" of "FIB3"
+                                        if log_item.size == 0x3342:  # "3B" of "FIB3"
+                                            pass
+                                        else:  # Execute pass even if log_item.size is not 0x3342 now.
+                                            pass
+                                    case _:
+                                        self.dbg_print(f"Unsupported log item magic: 0x{log_item.magic:x}")
+                                        self.dbg_print(f"log_op.item_data[:0x100]: {log_op.item_data[:0x100]}")
 
-                            idx += op_size
-                            pbar_log_op.update(op_size)
-                        pbar_log_op.close()
+                        idx += op_size
+                        pbar_log_op.update(op_size)
+                    pbar_log_op.close()
 
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         return ("file_type" in differences) or ("generation" in differences)

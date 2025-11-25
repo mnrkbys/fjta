@@ -26,12 +26,14 @@
 
 import copy
 import json
+import re
 import sys
 from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import IntEnum, auto
+from pathlib import Path
 
 import pytsk3
 from construct import ConstError, Container, StreamError
@@ -231,9 +233,10 @@ class LogRecordNotFoundError(Exception):
 
 class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs]):
     # def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
-    def __init__(self, img_info: ImageLike, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    def __init__(self, img_info: ImageLike, fs_info: pytsk3.FS_Info | None, args: Namespace, fstype: FsTypes = FsTypes.XFS) -> None:
         super().__init__(img_info, fs_info, args)
-        self.fstype = FsTypes.XFS
+        self.fstype = fstype
+        self.xfs_info_path: Path | None = None
         self.incomplete_log_ops: list[XfsLogOperation] = []
 
     def _convert_block_to_absaddr(self, block_num: int, log2val: int) -> int:
@@ -247,21 +250,50 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         return JournalTransactionXfs(tid=tid)
 
     def _parse_xfs_superblock(self) -> None:
-        self.xfs_superblock = xfs_dsb.parse(self.read_data(self.offset + 0x0, 0x200))
-        self.dbg_print(f"XFS superblock: {self.xfs_superblock}")
-        # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_format.h#L299 - XFS_SB_VERSION_NUM()
-        masked_ver = self.xfs_superblock.sb_versionnum & 0xF
-        if masked_ver != 5:
-            msg = f"XFS version: {masked_ver}. Only XFS version 5 is supported."
-            raise ValueError(msg)
-        self.block_size = self.xfs_superblock.sb_blocksize
-        self.sb_agblocks = self.xfs_superblock.sb_agblocks
-        self.sb_logstart_addr = self._convert_block_to_absaddr(self.xfs_superblock.sb_logstart, self.xfs_superblock.sb_agblklog)
-        self.sb_rootino = self.xfs_superblock.sb_rootino
-        self.sb_inodesize = self.xfs_superblock.sb_inodesize
+        if self.fstype == FsTypes.XFS:
+            self.xfs_superblock = xfs_dsb.parse(self.read_data(self.offset + 0x0, 0x200))
+            self.dbg_print(f"XFS superblock: {self.xfs_superblock}")
+            # https://github.com/torvalds/linux/blob/master/fs/xfs/libxfs/xfs_format.h#L299 - XFS_SB_VERSION_NUM()
+            masked_ver = self.xfs_superblock.sb_versionnum & 0xF
+            if masked_ver != 5:
+                msg = f"XFS version: {masked_ver}. Only XFS version 5 is supported."
+                raise ValueError(msg)
+            self.block_size = self.xfs_superblock.sb_blocksize
+            self.sb_agblocks = self.xfs_superblock.sb_agblocks
+            self.sb_logstart_addr = self._convert_block_to_absaddr(self.xfs_superblock.sb_logstart, self.xfs_superblock.sb_agblklog)
+            self.sb_logblocks = self.xfs_superblock.sb_logblocks
+            self.journal_data_len = self.sb_logblocks * self.block_size
+            self.sb_rootino = self.xfs_superblock.sb_rootino
+            self.sb_inodesize = self.xfs_superblock.sb_inodesize
+
+        elif self.fstype == FsTypes.EXPORTED_XFS_JOURNAL:
+            self.xfs_superblock = None
+            # self.block_size = 4096  # default block size
+            self.sb_logstart_addr = 0  # In exported XFS journal, log starts from the beginning of the file.
+            self.journal_data_len = self.img_info.get_size()
+            # self.sb_logblocks = self.journal_data_len // self.block_size
+
+    def _load_xfs_info(self, path: Path) -> bool:
+        self.block_size = 0
+        pattern_block_size = re.compile(r"^log\s*=.*?bsize=(\d+)\s*blocks=(\d+)")
+
+        if not path.exists() or not path.is_file():
+            return False
+
+        with path.open("r", encoding="utf-8") as fp:
+            for line in fp:
+                match = pattern_block_size.search(line)
+                if match:
+                    self.block_size = int(match.group(1))
+                    self.dbg_print(f"Loaded block size from {path}: {self.block_size}")
+                    self.sb_logblocks = int(match.group(2))
+                    self.dbg_print(f"Loaded log blocks from {path}: {self.sb_logblocks}")
+                    return True
+
+        return False
 
     def _find_first_log_record(self) -> int:
-        end = self.sb_logstart_addr + self.xfs_superblock.sb_logblocks * self.block_size
+        end = self.sb_logstart_addr + self.journal_data_len
         addr = self.sb_logstart_addr
         while addr < end:
             try:
@@ -279,14 +311,13 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
     def _read_journal_data(self, journal_addr: int, read_len: int = 4096) -> bytes:
         self.dbg_print(f"_read_journal_data journal_addr: 0x{journal_addr:0x}, read_len: {read_len}")
-        xfs_sb = self.xfs_superblock
         if journal_addr < self.sb_logstart_addr:
             self.dbg_print(
                 f"_read_journal_data journal_addr is smaller than self.sb_logstart_addr. something is wrong.: {journal_addr} < {self.sb_logstart_addr}",
             )
             return b""
-        journal_data_len = xfs_sb.sb_logblocks * self.block_size
-        self.dbg_print(f"_read_journal_data sb_logblocks: {xfs_sb.sb_logblocks}")
+        journal_data_len = self.journal_data_len
+        self.dbg_print(f"_read_journal_data sb_logblocks: {self.sb_logblocks}")
         self.dbg_print(f"_read_journal_data block_size: {self.block_size}")
         self.dbg_print(f"_read_journal_data journal_data_len: {journal_data_len}")
         read_pos = (journal_addr - self.sb_logstart_addr) % journal_data_len
@@ -762,6 +793,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         log_records: dict[int, int] = {}  # dict[h_lsn, journal_addr]
 
         self._parse_xfs_superblock()
+        if self.fstype == FsTypes.EXPORTED_XFS_JOURNAL and self.xfs_info_path and not self._load_xfs_info(self.xfs_info_path):
+            msg = f"Required XFS superblock parameters are not found: {self.xfs_info_path}"
+            raise ValueError(msg)
 
         first_log_rec_addr = self._find_first_log_record()  # This variable reflects the offset.
         if first_log_rec_addr == -1:
@@ -770,8 +804,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         journal_addr = first_log_rec_addr
 
         # Find all log records and sort by h_lsn.
-        pbar = self.tqdm(total=self.xfs_superblock.sb_logblocks * self.block_size, desc="Finding log records", unit="B", unit_scale=True, leave=False)
-        while journal_addr < first_log_rec_addr + self.xfs_superblock.sb_logblocks * self.block_size:
+        pbar = self.tqdm(total=self.sb_logblocks * self.block_size, desc="Finding log records", unit="B", unit_scale=True, leave=False)
+        while journal_addr < first_log_rec_addr + self.journal_data_len:
             try:
                 data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
                 record_header = xlog_rec_header.parse(data)

@@ -6,8 +6,6 @@
 #
 
 import copy
-import io
-import os
 from argparse import Namespace
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -28,8 +26,8 @@ class FsTypes(IntEnum):
     UNKNOWN = 0
     EXT4 = auto()
     XFS = auto()
-    EXT4_EXPORTED_JOURNAL = auto()
-    XFS_EXPORTED_JOURNAL = auto()
+    EXPORTED_EXT4_JOURNAL = auto()
+    EXPORTED_XFS_JOURNAL = auto()
 
 
 class DiskImgTypes(IntEnum):
@@ -38,6 +36,7 @@ class DiskImgTypes(IntEnum):
     EWF = auto()
     VMDK = auto()
     VHDI = auto()
+    EXPORTED_JOURNAL = auto()
 
 
 @runtime_checkable
@@ -99,7 +98,8 @@ class VHDIImgInfo(pytsk3.Img_Info):
 
 
 class RAWImgInfo:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path | str) -> None:
+        path = Path(path)
         self._path = path
         self._file = path.open("rb")
 
@@ -304,7 +304,8 @@ class TimelineEventInfo:
 
 class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     # io.BufferedReader might not be needed
-    def __init__(self, img_info: ImageLike | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    # def __init__(self, img_info: ImageLike | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    def __init__(self, img_info: ImageLike, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
         self.fstype = FsTypes.UNKNOWN
         self.img_info = img_info
         self.fs_info = fs_info
@@ -333,10 +334,11 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def read_data(self, address: int, size: int) -> bytes:
         if isinstance(self.img_info, ImageLike):
             return self.img_info.read(address, size)
-        if isinstance(self.img_info, io.BufferedReader):  # io.BufferedReader might not be needed
-            self.img_info.seek(address, os.SEEK_SET)
-            return self.img_info.read(size)
-        raise TypeError("img_info must be either pytsk3.Img_Info or io.BufferedReader.")
+        # if isinstance(self.img_info, io.BufferedReader):  # io.BufferedReader might not be needed
+        #     self.img_info.seek(address, os.SEEK_SET)
+        #     return self.img_info.read(size)
+        # raise TypeError("img_info must be either pytsk3.Img_Info or io.BufferedReader.")
+        raise TypeError("img_info must be an ImageLike object.")
 
     def _create_transaction(self, tid: int) -> T:
         msg = "Subclasses must implement _create_transaction."

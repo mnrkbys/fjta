@@ -24,10 +24,12 @@
 import copy
 import json
 import math
+import re
 import sys
 from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytsk3
 from construct import ConstError, Container, RangeError, StreamError
@@ -233,24 +235,33 @@ class JournalDescriptorNotFoundError(Exception):
 
 class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt4]):
     # def __init__(self, img_info: pytsk3.Img_Info | io.BufferedReader, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
-    def __init__(self, img_info: ImageLike, fs_info: pytsk3.FS_Info | None, args: Namespace) -> None:
+    def __init__(self, img_info: ImageLike, fs_info: pytsk3.FS_Info | None, args: Namespace, fstype: FsTypes = FsTypes.EXT4) -> None:
         super().__init__(img_info, fs_info, args)
-        self.fstype = FsTypes.EXT4
+        self.fstype = fstype
+        self.dumpe2fs_path: Path | None = None
 
     def _create_transaction(self, tid: int) -> JournalTransactionExt4:
         return JournalTransactionExt4(tid=tid)
 
     def _parse_ext4_superblock(self) -> None:
-        self.ext4_superblock = ext4_superblock_s.parse(self.img_info.read(self.offset + 0x400, ext4_superblock_s.sizeof()))
-        if self.ext4_superblock.s_magic == 0xEF53:  # EXT4 superblock magic number is 0xEF53
-            self.dbg_print(f"EXT4 superblock: {self.ext4_superblock}")
-            self.block_size = 2 ** (10 + self.ext4_superblock.s_log_block_size)
-            self.s_inode_size = self.ext4_superblock.s_inode_size
-        else:
-            msg = f"Bad magic number in EXT4 superblock: 0x{self.ext4_superblock.s_magic:x}"
-            raise ValueError(msg)
+        if self.fstype == FsTypes.EXT4:
+            self.ext4_superblock = ext4_superblock_s.parse(self.img_info.read(self.offset + 0x400, ext4_superblock_s.sizeof()))
+            if self.ext4_superblock.s_magic == 0xEF53:  # EXT4 superblock magic number is 0xEF53
+                self.dbg_print(f"EXT4 superblock: {self.ext4_superblock}")
+                self.s_inodes_per_group = self.ext4_superblock.s_inodes_per_group
+                self.block_size = 2 ** (10 + self.ext4_superblock.s_log_block_size)
+                self.s_inode_size = self.ext4_superblock.s_inode_size
+            else:
+                msg = f"Bad magic number in EXT4 superblock: 0x{self.ext4_superblock.s_magic:x}"
+                raise ValueError(msg)
+
+        elif self.fstype == FsTypes.EXPORTED_EXT4_JOURNAL:
+            self.ext4_superblock = None
 
     def _parse_block_group_descriptors(self) -> None:
+        if self.fstype != FsTypes.EXT4:
+            return
+
         self.bg_descriptors: list[Container] = []
         block_idx = 1  # Skip first block (Group 0 padding + EXT4 superblock)
         found_empty_bg_desc = False
@@ -270,7 +281,45 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
             block_idx += 1
 
+    def _load_dumpe2fs(self, path: Path) -> bool:
+        self.block_size = 0
+        self.s_inodes_per_group = 0
+        self.s_inode_size = 0
+        inode_tables: list[BgInodeTable] = []
+
+        pattern_block_size = re.compile(r"Block size:\s+(\d+)")
+        pattern_inode_per_group = re.compile(r"Inodes per group:\s+(\d+)")
+        pattern_inode_size = re.compile(r"Inode size:\s+(\d+)")
+        pattern_inode_table = re.compile(r"Inode table at (\d+)-(\d+)")
+
+        if not path.exists() or not path.is_file():
+            return False
+
+        with path.open("r", encoding="utf-8") as fp:
+            for line in fp:
+                if not self.block_size and (m_block_size := pattern_block_size.match(line)):
+                    self.block_size = int(m_block_size.group(1))
+                    continue
+                if not self.s_inodes_per_group and (m_inode_per_group := pattern_inode_per_group.match(line)):
+                    self.s_inodes_per_group = int(m_inode_per_group.group(1))
+                    continue
+                if not self.s_inode_size and (m_inode_size := pattern_inode_size.match(line)):
+                    self.s_inode_size = int(m_inode_size.group(1))
+                    continue
+
+                if not inode_tables and (m_inode_table := pattern_inode_table.search(line)):
+                    head = int(m_inode_table.group(1))
+                    end = int(m_inode_table.group(2))
+                    len = end - head + 1
+                    inode_tables.append(BgInodeTable(head, len))
+
+        self.inode_tables = inode_tables
+        return all((self.block_size, self.s_inodes_per_group, self.s_inode_size, inode_tables))
+
     def _retrieve_inode_tables(self) -> None:
+        if self.fstype != FsTypes.EXT4:
+            return
+
         ext4_sb = self.ext4_superblock
         inode_tables: list[BgInodeTable] = []
         enable_64bit_size_block = self.ext4_superblock.s_feature_incompat & ext4_structs.EXT4_FEATURE_INCOMPAT_64BIT
@@ -295,15 +344,21 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     def _read_journal_block(self, block_num: int) -> bytes:
         journal_sb = self.journal_superblock
         if block_num < journal_sb.s_first:
-            return b""
+            # return b""
+            msg = "block_num is less than s_first"
+            raise IndexError(msg)
         journal_data_len = journal_sb.s_maxlen - journal_sb.s_first
         read_pos = block_num % journal_data_len
         if read_pos == 0:
             read_pos = journal_data_len
-        return self.journal_file.read_random(read_pos * journal_sb.s_blocksize, journal_sb.s_blocksize)
+
+        if self.fstype == FsTypes.EXT4:
+            return self.journal_file.read_random(read_pos * journal_sb.s_blocksize, journal_sb.s_blocksize)
+        # FsTypes.EXPORTED_EXT4_JOURNAL
+        return self.img_info.read(read_pos * journal_sb.s_blocksize, journal_sb.s_blocksize)
 
     def _parse_journal_superblock(self) -> None:
-        data = self.journal_file.read_random(0, self.block_size)
+        data = self.journal_file.read_random(0, self.block_size) if self.fstype == FsTypes.EXT4 else self.img_info.read(0, self.block_size)
         self.journal_superblock = journal_superblock_s.parse(data)
         self.dbg_print(f"Journal superblock: {self.journal_superblock}")
         self.jbd2_feature_incompat_revoke = bool(self.journal_superblock.s_feature_incompat & ext4_structs.JBD2_FEATURE_INCOMPAT_REVOKE)
@@ -316,7 +371,10 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         self.dbg_print(f"Finding first descriptor block: {journal_sb.s_first}, {journal_sb.s_maxlen}")
         for block_num in range(journal_sb.s_first, journal_sb.s_maxlen):
             self.dbg_print(f"Block number: {block_num}")
-            data = self.journal_file.read_random(block_num * journal_sb.s_blocksize, journal_sb.s_blocksize)
+            if self.fstype == FsTypes.EXT4:
+                data = self.journal_file.read_random(block_num * journal_sb.s_blocksize, journal_sb.s_blocksize)
+            else:  # FsTypes.EXPORTED_EXT4_JOURNAL
+                data = self.img_info.read(block_num * journal_sb.s_blocksize, journal_sb.s_blocksize)
             self.dbg_print(f"Data: {data[:0x20]}")
             try:
                 block_header = journal_header_s.parse(data)
@@ -410,7 +468,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         if inode_table.head <= t_blocknr < inode_table.head + inode_table.len:
             idx = 0
             first_inode_num_in_table_block = (
-                (inode_table_num * self.ext4_superblock.s_inodes_per_group) + ((t_blocknr % inode_table.head) * (len(data) // self.s_inode_size)) + 1
+                (inode_table_num * self.s_inodes_per_group) + ((t_blocknr % inode_table.head) * (len(data) // self.s_inode_size)) + 1
             )
             while idx < len(data):
                 inode_data = data[idx : idx + self.s_inode_size]
@@ -479,6 +537,10 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         self._parse_ext4_superblock()
         self._parse_block_group_descriptors()
         self._retrieve_inode_tables()
+        if self.fstype == FsTypes.EXPORTED_EXT4_JOURNAL and self.dumpe2fs_path and not self._load_dumpe2fs(self.dumpe2fs_path):
+            msg = f"Required ext4 superblock parameters are not found: {self.dumpe2fs_path}"
+            raise ValueError(msg)
+
         self._parse_journal_superblock()
         journal_sb = self.journal_superblock
         first_desc_block = self._find_first_descriptor_block()

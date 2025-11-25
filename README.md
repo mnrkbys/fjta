@@ -25,10 +25,11 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Long extended attributes[^3]           | ✅     | ❌    |
 | Non-regular files (e.g. block devices) | ✅     | ✅    |
 | Year 2038 problem                      | ✅     | ✅    |
+| Exported journals                      | ✅     | ✅    |
 
 [^1]: Currently, only linear directories can be parsed. Support for hash tree directories will be added in future versions.
-[^2]: Symlink target names stored outside the inode.
-[^3]: Extended attributes stored outside the inode.
+[^2]: Symlink target names stored outside an inode.
+[^3]: Extended attributes stored outside an inode.
 
 ## Detectable Activities
 
@@ -223,6 +224,24 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security
 ...
 ```
 
+## How to export filesystem journals
+
+FJTA can analyze exported journals. However, some parameters required for analysis are not included in the exported data. Therefore, the corresponding superblock information must also be dumped.
+
+### ext4
+
+```bash
+sudo dumpe2fs /dev/sda3 > sda3.dumpe2fs
+sudo debugfs -R 'dump <8> sda3.journal' /dev/sda3
+```
+
+### XFS
+
+```bash
+sudo xfs_info /dev/mapper/rl-root > rl-root.xfs_info
+sudo xfs_logprint -C rl-root.journal /dev/mapper/rl-root
+```
+
 ## Tested on
 
 - Ubuntu 24.10 with kernel 6.8.0-63
@@ -234,7 +253,7 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security
 - EWF
 - VMDK
 - VHD / VHDX
-- Directory filesystem (ext4 and XFS partitions)
+- Directly filesystem (ext4 and XFS partitions)
 
 ## Contributing
 

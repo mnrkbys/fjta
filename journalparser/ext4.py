@@ -673,12 +673,25 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 finally:
                     block_num += 1
 
-    # Changing file_type implies inode reuse, even without DELETE_INODE in the previous transaction.
     # ext4 inode does not have a field for managing file generations like XFS's di_gen field.
     # ext4's l_i_version field is not equivalent to XFS's di_gen field.
     # If the last timeline event of the inode can be checked and its action is DELETE_INODE, the inode in this transaction is considered a reuse.
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
-        return "file_type" in differences
+        # If crtime is changed from non-zero to another value and dtime is not changed, it is considered inode reuse without DELETE_INODE.
+        if "crtime" in differences and "dtime" not in differences:
+            old_crtime, new_crtime = differences["crtime"]
+            return old_crtime != 0 and old_crtime < new_crtime if isinstance(old_crtime, int) and isinstance(new_crtime, int) else False
+
+        # This condition was implemented just in case.
+        # If file_type is changed, it is considered inode reuse.
+        if "file_type" in differences:
+            if "dtime" in differences:
+                old_dtime, new_dtime = differences["dtime"]
+                if isinstance(old_dtime, int) and isinstance(new_dtime, int) and old_dtime != 0 and new_dtime == 0:
+                    return False
+            return True
+
+        return False
 
     def _detect_delete(self, transaction_entry: EntryInfoExt4, reuse_inode: bool) -> tuple[bool, int, int]:
         if transaction_entry.dtime != 0:

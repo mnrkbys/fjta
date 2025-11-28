@@ -226,20 +226,30 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security
 
 ## How to export filesystem journals
 
-FJTA can analyze exported journals. However, some parameters required for analysis are not included in the exported data. Therefore, the corresponding superblock information must also be dumped.
+FJTA can analyze exported journals. However, some parameters required for analysis are not included in the journal itself. Therefore, you must also export the corresponding superblock (or filesystem metadata) information.
+
+When exporting both files, make sure they share the same filename without the extension.
+
+Use the following filename conventions:
+
+- *.journal (or any extension of your choice) for the exported journal
+- *.dumpe2fs for the dumpe2fs output (ext4)
+- *.xfs_info for the xfs_info output (XFS)
 
 ### ext4
 
 ```bash
-sudo dumpe2fs /dev/sda3 > sda3.dumpe2fs
 sudo debugfs -R 'dump <8> sda3.journal' /dev/sda3
+sudo dumpe2fs /dev/sda3 > sda3.dumpe2fs
+python ./fjta.py -i sda3.journal
 ```
 
 ### XFS
 
 ```bash
-sudo xfs_info /dev/mapper/rl-root > rl-root.xfs_info
 sudo xfs_logprint -C rl-root.journal /dev/mapper/rl-root
+sudo xfs_info /dev/mapper/rl-root > rl-root.xfs_info
+python ./fjta.py -i rl-root.journal
 ```
 
 ## Tested on

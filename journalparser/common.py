@@ -520,7 +520,21 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 cur_sec, new_sec = cast("tuple[int, int]", diffs["crtime"])
                 cur_nsec = working_entry.crtime_nanoseconds
                 new_nsec: int = cast("int", diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1])
-                if reuse_inode or (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime):
+                # - Evaluated archive commnads:
+                #       zip -r takeout.zip ./dummy_data/
+                #       rar a -r takeout.rar ./dummy_data/
+                #       7z a -r takeout.7z ./dummy_data/
+                #       tar cvzf takeout.tar.gz ./dummy_data/
+                #       gzip ./file1
+                #       bzip2 ./file1
+                if (
+                    reuse_inode
+                    or (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime)  # regular files, symlinks, and 7z
+                    or (
+                        transaction_entry.crtime == transaction_entry.atime and transaction_entry.ctime == transaction_entry.mtime
+                    )  # zip, rar, and tar
+                    or (transaction_entry.crtime == transaction_entry.ctime and transaction_entry.atime == transaction_entry.mtime)  # gzip and bzip2
+                ):
                     action |= Actions.CREATE_INODE
                     info = self._append_msg(info, self.format_timestamp(new_sec, new_nsec, label="Crtime", follow=False))
                 else:

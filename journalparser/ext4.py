@@ -554,6 +554,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         pbar = self.tqdm(total=journal_sb.s_maxlen - journal_sb.s_first, desc="Finding transactions", unit="block", leave=False)
         found_descriptor_block = False
         while block_num < first_desc_block + journal_sb.s_maxlen - journal_sb.s_first:
+            read_blocks = 1
             try:
                 data = self._read_journal_block(block_num)
                 block_header = journal_header_s.parse(data)
@@ -561,14 +562,17 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 if block_header.h_blocktype == ext4_structs.JBD2_DESCRIPTOR_BLOCK:
                     found_descriptor_block = True
                     tmp_journal_blocks[block_header.h_sequence] = block_num
+                    tags = self._parse_descriptor_block_tags(data)
+                    read_blocks = 1 + len(tags)
                 elif block_header.h_blocktype == ext4_structs.JBD2_COMMIT_BLOCK and found_descriptor_block:
                     journal_blocks.update(tmp_journal_blocks)
                     found_descriptor_block = False
+                    tmp_journal_blocks = {}
             except ConstError:
                 pass
             finally:
-                block_num += 1
-                pbar.update(1)
+                block_num += read_blocks
+                pbar.update(read_blocks)
         pbar.close()
 
         sorted_journal_blocks = dict(sorted(journal_blocks.items()))
@@ -691,6 +695,11 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                     return False
             return True
 
+        if "file_type" not in differences and "dtime" in differences:
+            old_dtime, new_dtime = differences["dtime"]
+            if isinstance(old_dtime, int) and isinstance(new_dtime, int) and old_dtime != 0 and new_dtime == 0:
+                return True
+
         return False
 
     def _detect_delete(self, transaction_entry: EntryInfoExt4, reuse_inode: bool) -> tuple[bool, int, int]:
@@ -750,9 +759,24 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                         # Create inode
                         # - Creation of files in a directory updates the directory's ctime and mtime,
                         #   so a directory created almost simultaneously with a large number of files may not be detected.
-                        #   Under the following conditions, differences of less than 1 second are ignored.
+                        # - Under the following conditions, differences of less than 1 second are ignored.
                         # - In some cases, such as creating symlinks, only atime is updated. So, it is removed from the condition.
-                        if transaction_entry.crtime != 0 and transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime:
+                        # - Evaluated archive commnads:
+                        #       zip -r takeout.zip ./dummy_data/
+                        #       rar a -r takeout.rar ./dummy_data/
+                        #       7z a -r takeout.7z ./dummy_data/
+                        #       tar cvzf takeout.tar.gz ./dummy_data/
+                        #       gzip ./file1
+                        #       bzip2 ./file1
+                        if transaction_entry.crtime != 0 and (
+                            (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime)  # regular files, symlinks, and 7z
+                            or (
+                                transaction_entry.crtime == transaction_entry.atime and transaction_entry.ctime == transaction_entry.mtime
+                            )  # zip, rar, and tar
+                            or (
+                                transaction_entry.crtime == transaction_entry.ctime and transaction_entry.atime == transaction_entry.mtime
+                            )  # gzip and bzip2
+                        ):
                             action |= Actions.CREATE_INODE
                             msg = self.format_timestamp(
                                 transaction_entry.crtime,

@@ -451,6 +451,24 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         raise NotImplementedError
 
+    def _detect_create(self, transaction_entry: U) -> bool:
+        # - Creation of files in a directory updates the directory's ctime and mtime,
+        #   so a directory created almost simultaneously with a large number of files may not be detected.
+        # - Under the following conditions, differences of less than 1 second are ignored.
+        # - In some cases, such as creating symlinks, only atime is updated. So, it is removed from the condition.
+        # - Evaluated archive commnads:
+        #       zip -r takeout.zip ./dummy_data/
+        #       rar a -r takeout.rar ./dummy_data/
+        #       7z a -r takeout.7z ./dummy_data/
+        #       tar cvzf takeout.tar.gz ./dummy_data/
+        #       gzip ./file1
+        #       bzip2 ./file1
+        return (
+            (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime)  # regular files, symlinks, and 7z
+            or (transaction_entry.crtime == transaction_entry.atime and transaction_entry.ctime == transaction_entry.mtime)  # zip, rar, and tar
+            or (transaction_entry.crtime == transaction_entry.ctime and transaction_entry.atime == transaction_entry.mtime)  # gzip and bzip2
+        )
+
     def _detect_delete(self, transaction_entry: U, reuse_inode: bool) -> tuple[bool, int, int]:
         raise NotImplementedError
 
@@ -527,14 +545,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 #       tar cvzf takeout.tar.gz ./dummy_data/
                 #       gzip ./file1
                 #       bzip2 ./file1
-                if (
-                    reuse_inode
-                    or (transaction_entry.ctime == transaction_entry.mtime == transaction_entry.crtime)  # regular files, symlinks, and 7z
-                    or (
-                        transaction_entry.crtime == transaction_entry.atime and transaction_entry.ctime == transaction_entry.mtime
-                    )  # zip, rar, and tar
-                    or (transaction_entry.crtime == transaction_entry.ctime and transaction_entry.atime == transaction_entry.mtime)  # gzip and bzip2
-                ):
+                if reuse_inode or self._detect_create(transaction_entry):
                     action |= Actions.CREATE_INODE
                     info = self._append_msg(info, self.format_timestamp(new_sec, new_nsec, label="Crtime", follow=False))
                 else:

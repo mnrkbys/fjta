@@ -109,10 +109,7 @@ class EntryInfoXfs(EntryInfo):
 
 @dataclass
 class JournalTransactionXfs(JournalTransaction):
-    record_len: int = 0
-    record_format: int = 0
     trans_state = TransState.UNKNOWN
-    tid_real: int = 0
 
     @staticmethod
     def _convert_to_epoch(seconds: int) -> int:
@@ -811,7 +808,6 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
                 record_header = xlog_rec_header.parse(data)
                 self.dbg_print(f"record_header: {record_header}")
-                # if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC and record_header.h_cycle > 0x0:
                 if record_header.h_cycle > 0x0:
                     if record_header.h_len >= xfs_structs.XLOG_HEADER_CYCLE_SIZE:
                         print(f"parse_journal xlog_rec_header.h_len is large: {record_header.h_len}", file=sys.stderr)
@@ -832,15 +828,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
-            # if record_header.h_magicno == xfs_structs.XLOG_HEADER_MAGIC:  # Not needed? journal_addr always points to a log record.
-            transaction_id = record_header.h_lsn  # Actually, this is not transaction ID, but using h_lsn as a substitute.
+            data = self._read_journal_data(journal_addr + 0x200, record_header.h_len)  # record header size is 0x200
+            transaction_id, log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
             self.add_transaction(transaction_id)
             transaction = self.transactions[transaction_id]
-            transaction.record_len = record_header.h_len
-            transaction.record_format = record_header.h_fmt
-            data = self._read_journal_data(journal_addr + 0x200, record_header.h_len)  # record header size is 0x200
-            tid_real, log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
-            transaction.tid_real = tid_real
             self.dbg_print(f"Number of log operations: record_header.h_num_logops = {record_header.h_num_logops}, log_ops = {len(log_ops)}")
             if len(log_ops) == record_header.h_num_logops:
                 self.dbg_print("All log operations are found.")
@@ -849,7 +840,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
             if log_ops:
                 xfs_trans_header = xfs_log_item = None
-                match transaction.record_format:
+                match record_header.h_fmt:
                     case xfs_structs.XLOG_FMT_UNKNOWN:
                         print("Unknown log record format does not supported.", file=sys.stderr)
                         return
@@ -866,7 +857,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                         self.xfs_inode_log_format_64 = xfs_inode_log_format_64_be
                         self.xfs_buf_log_format = xfs_buf_log_format_be
                     case _:
-                        print(f"Unsupported log record format: {transaction.record_format}", file=sys.stderr)
+                        print(f"Unsupported log record format: {record_header.h_fmt}", file=sys.stderr)
 
                 # Concatenate log operations if there are incomplete log operations.
                 log_ops = self._concatenate_log_ops(log_ops)
@@ -875,7 +866,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 if xfs_trans_header and xfs_log_item:
                     pbar_log_op = self.tqdm(
                         total=len(log_ops),
-                        desc=f"Parsing log operations (LSN {transaction_id})",
+                        desc=f"Parsing log operations (LSN {record_header.h_lsn})",
                         unit="log operation",
                         leave=False,
                     )
@@ -992,11 +983,11 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
     def timeline(self) -> None:
         working_entries: dict[int, EntryInfoXfs] = {}
         timeline_events: list[TimelineEventInfo] = []
-        for tid in self.tqdm(sorted(self.transactions), desc="Generating timeline", unit="transaction", leave=False):
+        for tid in self.tqdm(self.transactions, desc="Generating timeline", unit="transaction", leave=False):
             transaction = self.transactions[tid]
             self.update_directory_entries(transaction)
 
-            for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (LSN {tid})", unit="entry", leave=False):
+            for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (Transaction ID {tid})", unit="entry", leave=False):
                 # Skip special inodes except the root inode
                 # The root inode number is 128 and it is hanled as a normal inode here.
                 if not self.special_inodes and inode_num < 128:
@@ -1071,8 +1062,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     if action != Actions.UNKNOWN:
                         timeline_events.append(
                             TimelineEventInfo(
-                                # transaction_id=tid,
-                                transaction_id=transaction.tid_real,
+                                transaction_id=tid,
                                 inode=inode_num,
                                 file_type=transaction_entry.file_type,
                                 names=transaction_entry.names,

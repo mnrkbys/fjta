@@ -344,10 +344,9 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         msg = "Subclasses must implement _create_transaction."
         raise NotImplementedError(msg)
 
-    def add_transaction(self, tid: int, transaction: T | None = None) -> None:
-        if transaction is None or not self.transactions.get(tid):
-            transaction = self._create_transaction(tid)
-        self.transactions[tid] = transaction
+    def add_transaction(self, tid: int) -> None:
+        if not self.transactions.get(tid):
+            self.transactions[tid] = self._create_transaction(tid)
 
     def parse_journal(self) -> None:
         msg = "Subclasses must implement parse_journal."

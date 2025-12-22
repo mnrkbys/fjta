@@ -22,7 +22,7 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Short symlink target names             | ✅     | ✅    |
 | Long symlink target names[^2]          | ✅     | ❌    |
 | Short extended attributes              | ✅     | ✅    |
-| Long extended attributes[^3]           | ✅     | ❌    |
+| Long extended attributes[^3]           | ✅[^4] | ❌    |
 | Non-regular files (e.g. block devices) | ✅     | ✅    |
 | Year 2038 problem                      | ✅     | ✅    |
 | Exported journals                      | ✅     | ✅    |
@@ -30,6 +30,7 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 [^1]: Currently, only linear directories can be parsed. Support for hash tree directories will be added in future versions.
 [^2]: Symlink target names stored outside an inode.
 [^3]: Extended attributes stored outside an inode.
+[^4]: Only the first data block assigned to the extended attribute is recognized. The EXT4_FEATURE_INCOMPAT_EA_INODE flag is not supported.
 
 ## Detectable Activities
 
@@ -39,9 +40,9 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 | Deleting files                        | ✅     | ✅    |
 | Modification of extended attributes   | ✅     | ✅    |
 | Timestomping (timestamp manipulation) | ✅     | ✅    |
-| Other inode metadata changes[^4]      | ✅     | ✅    |
+| Other inode metadata changes[^5]      | ✅     | ✅    |
 
-[^4]: "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
+[^5]: "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
 
 ## Requirements
 
@@ -224,6 +225,46 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security
 ...
 ```
 
+## Detecting data exfiltration by filtering and formatting with jq, awk, and column
+
+In the following output example, you can also see a list of the exfiltrated files.
+
+```bash
+$ python ./fjta.py -i xfs_data_exfiltration.img | jq -r '
+  select(
+    (.action == "ACCESS")
+    or (.names | to_entries | any(.value[] | test("\\.(zip|rar|7z|gz|bz2)$"; "i")))
+  )
+  | [
+      .inode,
+      (.names | tostring),
+      .size,
+      .action,
+      .mode,
+      (.mtime  | strftime("%Y-%m-%d %H:%M:%S")),
+      (.atime  | strftime("%Y-%m-%d %H:%M:%S")),
+      (.ctime  | strftime("%Y-%m-%d %H:%M:%S")),
+      (.crtime | strftime("%Y-%m-%d %H:%M:%S"))
+    ]
+  | @tsv
+' |
+awk -F'\t' '{printf "%s\t%s\t%s\t%s\t%04o\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9}' | column -s $'\t' -t -N inode,names,size,action,mode,mtime,atime,ctime,crtime
+inode    names                       size       action                        mode  mtime                atime                ctime                crtime
+132      {"128":["dummy_data"]}      30         ACCESS                        0755  2025-12-19 01:54:10  2025-12-19 01:55:20  2025-12-19 01:54:10  2025-12-19 01:54:10
+524416   {"132":["dir1"]}            66         ACCESS                        0755  2025-12-19 01:54:10  2025-12-19 01:55:20  2025-12-19 01:54:10  2025-12-19 01:54:10
+1179776  {"524416":["dir2"]}         137        ACCESS                        0755  2025-12-19 01:54:10  2025-12-19 01:55:20  2025-12-19 01:54:10  2025-12-19 01:54:10
+1572992  {"524416":["dir3"]}         146        ACCESS                        0755  2025-12-19 01:54:10  2025-12-19 01:55:20  2025-12-19 01:54:10  2025-12-19 01:54:10
+...
+1179777  {"1179776":["file1"]}       1048576    ACCESS                        0644  2025-12-19 01:54:10  2025-12-19 01:55:20  2025-12-19 01:54:10  2025-12-19 01:54:10
+1179778  {"1179776":["file2"]}       1048576    ACCESS                        0644  2025-12-19 01:54:10  2025-12-19 01:55:20  2025-12-19 01:54:10  2025-12-19 01:54:10
+1179779  {"1179776":["file3"]}       1048576    ACCESS                        0644  2025-12-19 01:54:10  2025-12-19 01:55:20  2025-12-19 01:54:10  2025-12-19 01:54:10
+...
+164      {"155":["file99"]}          1048576    ACCESS                        0644  2025-12-19 01:54:11  2025-12-19 01:55:22  2025-12-19 01:54:11  2025-12-19 01:54:11
+165      {"155":["file100"]}         1048576    ACCESS                        0644  2025-12-19 01:54:11  2025-12-19 01:55:22  2025-12-19 01:54:11  2025-12-19 01:54:11
+167      {"128":["takeout.zip"]}     0          CREATE_INODE|CREATE_HARDLINK  0644  2025-12-19 01:55:22  2025-12-19 01:55:20  2025-12-19 01:55:22  2025-12-19 01:55:20
+167      {"128":["takeout.zip"]}     104894079  SIZE_UP                       0644  2025-12-19 01:55:22  2025-12-19 01:55:20  2025-12-19 01:55:22  2025-12-19 01:55:20
+```
+
 ## How to export filesystem journals
 
 FJTA can analyze exported journals. However, some parameters required for analysis are not included in the journal itself. Therefore, you must also export the corresponding superblock (or filesystem metadata) information.
@@ -254,8 +295,8 @@ python ./fjta.py -i rl-root.journal
 
 ## Tested on
 
-- Ubuntu 24.10 with kernel 6.8.0-63
-- Rocky Linux 9.4 with kernel 5.14.0-427.31.1.el9_4.x86_64
+- Ubuntu 24.10 with kernel 6.8.0-88
+- Rocky Linux 9.4 with kernel 5.14.0-570.49.1.el9_6.x86_64
 
 ## Supported Formats
 

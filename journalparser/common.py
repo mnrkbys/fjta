@@ -455,7 +455,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         #   so a directory created almost simultaneously with a large number of files may not be detected.
         # - Under the following conditions, differences of less than 1 second are ignored.
         # - In some cases, such as creating symlinks, only atime is updated. So, it is removed from the condition.
-        # - Evaluated archive commnads:
+        # - Evaluated archive commands:
         #       zip -r takeout.zip ./dummy_data/
         #       rar a -r takeout.rar ./dummy_data/
         #       7z a -r takeout.7z ./dummy_data/
@@ -537,7 +537,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 cur_sec, new_sec = cast("tuple[int, int]", diffs["crtime"])
                 cur_nsec = working_entry.crtime_nanoseconds
                 new_nsec: int = cast("int", diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1])
-                # - Evaluated archive commnads:
+                # - Evaluated archive commands:
                 #       zip -r takeout.zip ./dummy_data/
                 #       rar a -r takeout.rar ./dummy_data/
                 #       7z a -r takeout.7z ./dummy_data/

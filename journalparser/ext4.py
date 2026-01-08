@@ -681,24 +681,18 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
     # ext4's l_i_version field is not equivalent to XFS's di_gen field.
     # If the last timeline event of the inode can be checked and its action is DELETE_INODE, the inode in this transaction is considered a reuse.
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
+        if "dtime" in differences:
+            old_dtime, new_dtime = differences["dtime"]
+            return old_dtime != 0 and new_dtime == 0 if isinstance(old_dtime, int) and isinstance(new_dtime, int) else False
+
+        # If file_type is changed, it is considered inode reuse.
+        if "file_type" in differences:
+            return True
+
         # If crtime is changed from non-zero to another value and dtime is not changed, it is considered inode reuse without DELETE_INODE.
         if "crtime" in differences and "dtime" not in differences:
             old_crtime, new_crtime = differences["crtime"]
             return old_crtime != 0 and old_crtime < new_crtime if isinstance(old_crtime, int) and isinstance(new_crtime, int) else False
-
-        # This condition was implemented just in case.
-        # If file_type is changed, it is considered inode reuse.
-        if "file_type" in differences:
-            if "dtime" in differences:
-                old_dtime, new_dtime = differences["dtime"]
-                if isinstance(old_dtime, int) and isinstance(new_dtime, int) and old_dtime != 0 and new_dtime == 0:
-                    return False
-            return True
-
-        if "file_type" not in differences and "dtime" in differences:
-            old_dtime, new_dtime = differences["dtime"]
-            if isinstance(old_dtime, int) and isinstance(new_dtime, int) and old_dtime != 0 and new_dtime == 0:
-                return True
 
         return False
 

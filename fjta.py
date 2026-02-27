@@ -19,14 +19,15 @@
 #
 
 import argparse
+import importlib
 import sys
+from collections.abc import Sequence
+from typing import TextIO
 
-from journalparser import journalparser
-from journalparser.journalparser import UnsupportedFilesystemError, UnsupportedImageError
 from journalparser.version import VERSION
 
 
-def parse_arguments() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate a timeline of file system activities from the filesystem journal log.",
     )
@@ -43,12 +44,6 @@ def parse_arguments() -> argparse.Namespace:
         default=0,
         help="Filesystem offset in bytes. (Default: 0)",
     )
-    # parser.add_argument(
-    #     "-o",
-    #     "--output",
-    #     type=str,
-    #     help="Path to an output file. (Default: stdout)",
-    # )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -70,24 +65,38 @@ def parse_arguments() -> argparse.Namespace:
         action="version",
         version=f"%(prog)s {VERSION}",
     )
-    return parser.parse_args()
+    return parser
 
 
-def main() -> None:
+def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
+
+
+def run(args: argparse.Namespace, err_stream: TextIO | None = None) -> int:
+    jp_module = importlib.import_module("journalparser.journalparser")
+    unsupported_image_error = jp_module.UnsupportedImageError
+    unsupported_filesystem_error = jp_module.UnsupportedFilesystemError
+    target_err = err_stream if err_stream is not None else sys.stderr
+
     if not args.image:
-        print("Please specify a disk image file.", file=sys.stderr)
-        sys.exit(1)
+        print("Please specify a disk image file.", file=target_err)
+        return 1
 
     try:
-        parser = journalparser.JournalParser(args.image, args)
-    except (FileNotFoundError, ValueError, UnsupportedImageError, UnsupportedFilesystemError) as err:
-        print(err, file=sys.stderr)
-        sys.exit(1)
+        parser = jp_module.JournalParser(args.image, args)
+    except (FileNotFoundError, ValueError, unsupported_image_error, unsupported_filesystem_error) as err:
+        print(err, file=target_err)
+        return 1
     else:
         parser.parse_journal()
         parser.timeline()
+        return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_arguments(argv)
+    return run(args)
 
 
 if __name__ == "__main__":
-    args = parse_arguments()
-    main()
+    sys.exit(main())

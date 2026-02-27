@@ -35,7 +35,6 @@ import pytsk3
 from construct import ConstError, Container, RangeError, StreamError
 
 from journalparser.common import (
-    Actions,
     DentInfo,
     DeviceNumber,
     EntryInfo,
@@ -731,74 +730,14 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 transaction_entry = transaction.entries[inode_num]
                 # Generate working_entriy and first timeline event for each inode
                 if not working_entries.get(inode_num):
-                    msg = info = ""
-                    action = Actions.UNKNOWN
                     working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
-                    atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
-                    ctime_f = self._to_float_ts(transaction_entry.ctime, transaction_entry.ctime_nanoseconds)
-                    mtime_f = self._to_float_ts(transaction_entry.mtime, transaction_entry.mtime_nanoseconds)
-                    crtime_f = self._to_float_ts(transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
-                    dtime_f = self._to_float_ts(transaction_entry.dtime, transaction_entry.dtime_nanoseconds)
-
-                    transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
-
-                    is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, False)
-                    if is_delete:
-                        action |= Actions.DELETE_INODE
-                        info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
-                        dtime_f = self._to_float_ts(d_sec, d_nsec)
-                        self._refresh_directory_entries(inode_num, transaction)
-
-                    if not (action & Actions.DELETE_INODE):
-                        # Create inode
-                        if transaction_entry.crtime != 0 and self._detect_create(transaction_entry):
-                            action |= Actions.CREATE_INODE
-                            msg = self.format_timestamp(
-                                transaction_entry.crtime,
-                                transaction_entry.crtime_nanoseconds,
-                                label="Crtime",
-                                follow=False,
-                            )
-                            info = self._append_msg(info, msg)
-
-                        # Create hard link
-                        if action & Actions.CREATE_INODE:
-                            action |= Actions.CREATE_HARDLINK
-                            if transaction_entry.link_count > 0:
-                                info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
-
-                        for mac_type, mac_ts, act, label in (
-                            ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
-                            ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
-                            ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
-                        ):
-                            if self._timestomp((transaction_entry.crtime, transaction_entry.crtime_nanoseconds), mac_ts):
-                                action |= act | Actions.TIMESTOMP
-                                msg = self.format_timestamp(
-                                    mac_ts[0],
-                                    mac_ts[1],
-                                    label=label,
-                                    follow=False,
-                                )
-                                msg += f" (Timestomp: {mac_type} < crtime)"
-                                info = self._append_msg(info, msg)
-                            elif self._timestomp(mac_ts, commit_ts):
-                                action |= act | Actions.TIMESTOMP
-                                msg = self.format_timestamp(
-                                    mac_ts[0],
-                                    mac_ts[1],
-                                    label=label,
-                                    follow=False,
-                                )
-                                msg += f" (Timestomp: commit_time < {mac_type})"
-                                info = self._append_msg(info, msg)
-
-                        # Set flags
-                        if transaction_entry.flags & (ext4_structs.EXT4_IMMUTABLE_FL | ext4_structs.EXT4_NOATIME_FL):
-                            action |= Actions.CHANGE_FLAGS
-                            info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
-                            if add_info := self._apply_flag_changes(transaction_entry.flags):
-                                info = self._append_msg(info, add_info, " ")
+                    if timeline_event := self._generate_initial_timeline_event_common(
+                        tid,
+                        inode_num,
+                        transaction_entry,
+                        commit_ts=commit_ts,
+                    ):
+                        timeline_events.append(timeline_event)
 
                     # Copy symlink target to working entry
                     if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
@@ -808,32 +747,6 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
                     # Update working_entry with transaction_entry
                     working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
-
-                    if action != Actions.UNKNOWN:
-                        timeline_events.append(
-                            TimelineEventInfo(
-                                transaction_id=tid,
-                                inode=inode_num,
-                                file_type=transaction_entry.file_type,
-                                names=transaction_entry.names,
-                                action=action,
-                                mode=transaction_entry.mode,
-                                uid=transaction_entry.uid,
-                                gid=transaction_entry.gid,
-                                size=transaction_entry.size,
-                                atime=atime_f,
-                                ctime=ctime_f,
-                                mtime=mtime_f,
-                                crtime=crtime_f,
-                                dtime=dtime_f,
-                                flags=transaction_entry.flags,
-                                link_count=transaction_entry.link_count,
-                                symlink_target=transaction_entry.symlink_target,
-                                extended_attributes=transaction_entry.extended_attributes,
-                                device_number=transaction_entry.device_number,
-                                info=info,
-                            ),
-                        )
 
                 # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
                 # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.

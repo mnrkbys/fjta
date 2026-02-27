@@ -14,33 +14,36 @@ FJTA (Forensic Journal Timeline Analyzer) is a tool that analyzes Linux filesyst
 
 ## Supported Artifacts in Filesystem Journals
 
-| Artifacts                              |  ext4  |  XFS  |
-|----------------------------------------|:------:|:-----:|
-| inode                                  | ✅     | ✅    |
-| Directories with few entries           | ✅     | ✅    |
-| Directories with many entries          | ✅[^1] | ✅    |
-| Short symlink target names             | ✅     | ✅    |
-| Long symlink target names[^2]          | ✅     | ❌    |
-| Short extended attributes              | ✅     | ✅    |
-| Long extended attributes[^3]           | ✅[^4] | ❌    |
-| Non-regular files (e.g. block devices) | ✅     | ✅    |
-| Year 2038 problem                      | ✅     | ✅    |
-| Exported journals                      | ✅     | ✅    |
+| Artifacts                              |  ext4  | XFS |
+| -------------------------------------- | :----: | :-: |
+| inode                                  |   ✅   | ✅  |
+| Directories with few entries           |   ✅   | ✅  |
+| Directories with many entries          | ✅[^1] | ✅  |
+| Short symlink target names             |   ✅   | ✅  |
+| Long symlink target names[^2]          |   ✅   | ❌  |
+| Short extended attributes              |   ✅   | ✅  |
+| Long extended attributes[^3]           | ✅[^4] | ❌  |
+| Non-regular files (e.g. block devices) |   ✅   | ✅  |
+| Year 2038 problem                      |   ✅   | ✅  |
+| Exported journals                      |   ✅   | ✅  |
 
 [^1]: Currently, only linear directories can be parsed. Support for hash tree directories will be added in future versions.
+
 [^2]: Symlink target names stored outside an inode.
+
 [^3]: Extended attributes stored outside an inode.
+
 [^4]: Only the first data block assigned to the extended attribute is recognized. The EXT4_FEATURE_INCOMPAT_EA_INODE flag is not supported.
 
 ## Detectable Activities
 
-| Activities                            |  ext4  |  XFS  |
-|---------------------------------------|:------:|:-----:|
-| Creating files                        | ✅     | ✅    |
-| Deleting files                        | ✅     | ✅    |
-| Modification of extended attributes   | ✅     | ✅    |
-| Timestomping (timestamp manipulation) | ✅     | ✅    |
-| Other inode metadata changes[^5]      | ✅     | ✅    |
+| Activities                            | ext4 | XFS |
+| ------------------------------------- | :--: | :-: |
+| Creating files                        |  ✅  | ✅  |
+| Deleting files                        |  ✅  | ✅  |
+| Modification of extended attributes   |  ✅  | ✅  |
+| Timestomping (timestamp manipulation) |  ✅  | ✅  |
+| Other inode metadata changes[^5]      |  ✅  | ✅  |
 
 [^5]: "Other inode metadata changes" include updates to MACB timestamps (mtime, atime, ctime, and crtime), file size changes, and setting file flags, and more.
 
@@ -225,6 +228,49 @@ python ./fjta.py -s 0 -i ~/xfs.img | jq 'select(.info | test("added ea: security
 ...
 ```
 
+## Output Contract (JSON Lines)
+
+FJTA writes one JSON object per line (JSONL/NDJSON) to stdout.
+
+### Event object
+
+Each line is a timeline event with the following fields.
+
+- `transaction_id` (integer): Transaction identifier in journal order.
+- `action` (string): One or more action flags joined by `|`.
+- `inode` (integer): Inode number.
+- `file_type` (string): `REGULAR_FILE`, `DIRECTORY`, `SYMBOLIC_LINK`, etc.
+- `names` (object): Directory-inode-to-name-list mapping. Example: `{"2": ["test.txt"]}`.
+- `mode` (integer): File mode in decimal.
+- `uid`, `gid` (integer): Owner and group IDs.
+- `size` (integer): File size in bytes.
+- `atime`, `ctime`, `mtime`, `crtime`, `dtime` (number): Epoch timestamps with sub-second precision.
+- `flags` (integer): Filesystem-specific flag bitmask.
+- `link_count` (integer): Hard-link count.
+- `symlink_target` (string): Symlink target if available.
+- `extended_attributes` (array): List of `{name, value}` objects.
+- `device_number` (object): `{major, minor}` for device files.
+- `info` (string): Human-readable details for forensic interpretation.
+
+### `action` semantics
+
+- `action` is a bitflag representation serialized as names joined by `|`.
+- Token order is not guaranteed. Parse by splitting on `|` and matching tokens.
+- Common values include `CREATE_INODE`, `DELETE_INODE`, `CREATE_HARDLINK`, `DELETE_HARDLINK`, `ACCESS`, `CHANGE`, `MODIFY`, `TIMESTOMP`, `MOVE`, and metadata-change actions.
+
+### Compatibility policy
+
+- Existing documented keys are intended to remain available.
+- New keys may be added in future versions.
+- Consumers should ignore unknown keys for forward compatibility.
+- The text format of `info` is informative and may change across versions.
+
+### Diagnostics contract
+
+- Timeline events are written to `stdout` only.
+- Warnings, debug logs, and parser diagnostics are written to `stderr`.
+- `stderr` output is operator-oriented and not a stable machine-parseable API.
+
 ## Detecting data exfiltration by filtering and formatting with jq, awk, and column
 
 In the following output example, you can also see a list of the exfiltrated files.
@@ -273,9 +319,9 @@ When exporting both files, make sure they share the same filename without the ex
 
 Use the following filename conventions:
 
-- *.journal (or any extension of your choice) for the exported journal
-- *.dumpe2fs for the dumpe2fs output (ext4)
-- *.xfs_info for the xfs_info output (XFS)
+- \*.journal (or any extension of your choice) for the exported journal
+- \*.dumpe2fs for the dumpe2fs output (ext4)
+- \*.xfs_info for the xfs_info output (XFS)
 
 ### ext4
 
@@ -312,7 +358,7 @@ Contributions are welcome! If you wish to contribute, please fork the repository
 
 ## Limitations
 
-- FJTA is still under development, so some filesystem data may not be available for analysis. Additionally, the output format is subject to change.
+- FJTA is still under development, so some filesystem data may not be available for analysis.
 - FJTA can analyze only ext4 and XFS version 5 (inode version 3).
 - FJTA does not support LVM.
 - Only ext4 journals stored with "data=ordered" are supported. data=ordered is the default journaling mode in most Linux distributions.

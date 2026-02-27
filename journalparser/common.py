@@ -680,6 +680,104 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self._update_working_entry_fields(working_entry, transaction_entry, diffs)
         return timeline_event
 
+    def _generate_initial_timeline_event_common(
+        self,
+        tid: int,
+        inode_num: int,
+        transaction_entry: U,
+        commit_ts: tuple[int, int] | None = None,
+    ) -> TimelineEventInfo | None:
+        msg = info = ""
+        action = Actions.UNKNOWN
+
+        atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
+        ctime_f = self._to_float_ts(transaction_entry.ctime, transaction_entry.ctime_nanoseconds)
+        mtime_f = self._to_float_ts(transaction_entry.mtime, transaction_entry.mtime_nanoseconds)
+        crtime_f = self._to_float_ts(transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
+        dtime_f = 0.0
+
+        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
+
+        is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, False)
+        if is_delete:
+            action |= Actions.DELETE_INODE
+            info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
+            dtime_f = self._to_float_ts(d_sec, d_nsec)
+            self._refresh_directory_entries(inode_num, self.transactions[tid])
+
+        if not (action & Actions.DELETE_INODE):
+            if transaction_entry.crtime != 0 and self._detect_create(transaction_entry):
+                action |= Actions.CREATE_INODE
+                msg = self.format_timestamp(
+                    transaction_entry.crtime,
+                    transaction_entry.crtime_nanoseconds,
+                    label="Crtime",
+                    follow=False,
+                )
+                info = self._append_msg(info, msg)
+
+            if action & Actions.CREATE_INODE:
+                action |= Actions.CREATE_HARDLINK
+                if transaction_entry.link_count > 0:
+                    info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
+
+            for mac_type, mac_ts, act, label in (
+                ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
+                ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
+                ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
+            ):
+                if self._timestomp((transaction_entry.crtime, transaction_entry.crtime_nanoseconds), mac_ts):
+                    action |= act | Actions.TIMESTOMP
+                    msg = self.format_timestamp(
+                        mac_ts[0],
+                        mac_ts[1],
+                        label=label,
+                        follow=False,
+                    )
+                    msg += f" (Timestomp: {mac_type} < crtime)"
+                    info = self._append_msg(info, msg)
+                elif commit_ts and self._timestomp(mac_ts, commit_ts):
+                    action |= act | Actions.TIMESTOMP
+                    msg = self.format_timestamp(
+                        mac_ts[0],
+                        mac_ts[1],
+                        label=label,
+                        follow=False,
+                    )
+                    msg += f" (Timestomp: commit_time < {mac_type})"
+                    info = self._append_msg(info, msg)
+
+            if add_info := self._apply_flag_changes(transaction_entry.flags):
+                action |= Actions.CHANGE_FLAGS
+                info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
+                info = self._append_msg(info, add_info, " ")
+
+        if action == Actions.UNKNOWN:
+            return None
+
+        return TimelineEventInfo(
+            transaction_id=tid,
+            inode=inode_num,
+            file_type=transaction_entry.file_type,
+            names=transaction_entry.names,
+            action=action,
+            mode=transaction_entry.mode,
+            uid=transaction_entry.uid,
+            gid=transaction_entry.gid,
+            size=transaction_entry.size,
+            atime=atime_f,
+            ctime=ctime_f,
+            mtime=mtime_f,
+            crtime=crtime_f,
+            dtime=dtime_f,
+            flags=transaction_entry.flags,
+            link_count=transaction_entry.link_count,
+            symlink_target=transaction_entry.symlink_target,
+            extended_attributes=transaction_entry.extended_attributes,
+            device_number=transaction_entry.device_number,
+            info=info,
+        )
+
     def timeline(self) -> None:
         msg = "Subclasses must implement timeline."
         raise NotImplementedError(msg)

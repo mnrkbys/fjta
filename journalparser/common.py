@@ -6,12 +6,15 @@
 #
 
 import copy
+import json
 import sys
 from argparse import Namespace
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol, cast, runtime_checkable
 
 import pyewf
@@ -334,6 +337,12 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def warn(self, message: str) -> None:
         source = self.fstype.name if self.fstype != FsTypes.UNKNOWN else type(self).__name__
         emit_warning(message, source)
+
+    def perf(self, stage: str, elapsed: float, *, count: int | None = None) -> None:
+        if not self.debug:
+            return
+        details = f"; count={count}" if count is not None else ""
+        self.warn(f"PERF {stage}: {elapsed:.6f}s{details}")
 
     def tqdm(self, *args, **kwargs) -> TqdmType:
         if "disable" not in kwargs:
@@ -787,6 +796,23 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             info=info,
         )
 
-    def timeline(self) -> None:
-        msg = "Subclasses must implement timeline."
+    def infer_timeline_events(self) -> list[TimelineEventInfo]:
+        msg = "Subclasses must implement infer_timeline_events."
         raise NotImplementedError(msg)
+
+    def emit_timeline_events(self, events: Iterable[TimelineEventInfo]) -> None:
+        for event in events:
+            print(json.dumps(event.to_dict()))
+
+    def timeline(self) -> None:
+        infer_start = perf_counter()
+        events = self.infer_timeline_events()
+        infer_elapsed = perf_counter() - infer_start
+
+        emit_start = perf_counter()
+        self.emit_timeline_events(events)
+        emit_elapsed = perf_counter() - emit_start
+
+        self.perf("timeline.infer", infer_elapsed, count=len(events))
+        self.perf("timeline.emit", emit_elapsed, count=len(events))
+        self.perf("timeline.total", infer_elapsed + emit_elapsed, count=len(events))

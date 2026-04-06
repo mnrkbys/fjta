@@ -25,7 +25,6 @@
 # https://github.com/torvalds/linux/blob/master/include/linux/kdev_t.h
 
 import copy
-import json
 import re
 from argparse import Namespace
 from collections.abc import Generator
@@ -980,7 +979,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
     def _generate_timeline_event(self, transaction: JournalTransactionXfs, inode_num: int, working_entry: EntryInfoXfs) -> TimelineEventInfo | None:
         return self._generate_timeline_event_common(transaction, inode_num, working_entry, commit_ts=None)
 
-    def timeline(self) -> None:
+    def infer_timeline_events(self) -> list[TimelineEventInfo]:
         working_entries: dict[int, EntryInfoXfs] = {}
         timeline_events: list[TimelineEventInfo] = []
         for tid in self.tqdm(self.transactions, desc="Generating timeline", unit="transaction", leave=False):
@@ -1012,9 +1011,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 # Generate timeline event for each inode
                 if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
                     timeline_events.append(timeline_event)
-
-        for event in timeline_events:
-            print(json.dumps(event.to_dict()))
+        return timeline_events
 
 
 def parse_extent(ext: int) -> tuple[int, int, int, int]:

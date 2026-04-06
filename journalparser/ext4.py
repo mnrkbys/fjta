@@ -22,7 +22,6 @@
 # https://righteousit.com/2024/09/04/more-on-ext4-timestamps-and-timestomping/
 
 import copy
-import json
 import math
 import re
 from argparse import Namespace
@@ -714,7 +713,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
         return self._generate_timeline_event_common(transaction, inode_num, working_entry, commit_ts)
 
-    def timeline(self) -> None:
+    def infer_timeline_events(self) -> list[TimelineEventInfo]:
         working_entries: dict[int, EntryInfoExt4] = {}
         timeline_events: list[TimelineEventInfo] = []
         for tid in self.tqdm(sorted(self.transactions), desc="Generating timeline", unit="transaction", leave=False):
@@ -770,6 +769,4 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 # Generate timeline event for each inode
                 if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
                     timeline_events.append(timeline_event)
-
-        for event in timeline_events:
-            print(json.dumps(event.to_dict()))
+        return timeline_events

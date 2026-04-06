@@ -27,7 +27,6 @@
 import copy
 import json
 import re
-import sys
 from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -51,6 +50,7 @@ from journalparser.common import (
     JournalParserCommon,
     JournalTransaction,
     TimelineEventInfo,
+    emit_warning,
 )
 from journalparser.structs import xfs_structs
 from journalparser.structs.xfs_structs import (
@@ -193,7 +193,7 @@ class JournalTransactionXfs(JournalTransaction):
                 if name not in dent[inode_num]:
                     dent[inode_num].append(name)
             except UnicodeDecodeError:
-                print(f"set_dent_info UnicodeDecodeError: {dir_entry}", file=sys.stderr)
+                emit_warning(f"set_dent_info UnicodeDecodeError: {dir_entry}", "XFS")
 
         # Set EntryInfo
         if dir_entry:
@@ -552,9 +552,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         old_idx = 0
         while len(log_ops) >= inode_log_format_64.ilf_size and idx < inode_log_format_64.ilf_size:
             if idx == old_idx:
-                print(f"inode_log_format_64.ilf_fields contains unprocessable values: 0x{inode_log_format_64.ilf_fields:x}", file=sys.stderr)
+                msg = f"inode_log_format_64.ilf_fields contains unprocessable values: 0x{inode_log_format_64.ilf_fields:x}"
+                self.warn(msg)
                 self.dbg_print(f"_parse_inode_update inode_log_format_64.ilf_fields: {inode_log_format_64.ilf_fields}")
-                sys.exit(1)
+                raise ValueError(msg)
             old_idx = idx
             self.dbg_print(f"_parse_inode_update idx: {idx}")
             if (
@@ -715,7 +716,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             # elif dir3_data_hdr.hdr.magic == 0x58534C4D:  # XSLM = 0x58534c4d
             elif magic == b"XSLM":  # XSLM = 0x58534c4d
                 # XFS Algorithms & Data Structures, chapter 22.2 Extent Symbolic Links
-                print("Found a log operation which has the XSLM magic number. Need to implement a parser for extent symbolic links.", file=sys.stderr)
+                self.warn("Found a log operation which has the XSLM magic number. Need to implement a parser for extent symbolic links.")
 
         except StreamError:
             self.dbg_print("_parse_buffer_writes Exception StreamError")
@@ -782,7 +783,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 tmp_log_ops.extend(log_ops)
                 self.incomplete_log_ops = []
                 return tmp_log_ops
-            print(f"_concatenate_log_ops oh_flags != 0: {tmp_log_ops[-1].op_header.oh_flags}", file=sys.stderr)
+            self.warn(f"_concatenate_log_ops oh_flags != 0: {tmp_log_ops[-1].op_header.oh_flags}")
 
         return log_ops
 
@@ -809,10 +810,10 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 self.dbg_print(f"record_header: {record_header}")
                 if record_header.h_cycle > 0x0:
                     if record_header.h_len >= xfs_structs.XLOG_HEADER_CYCLE_SIZE:
-                        print(f"parse_journal xlog_rec_header.h_len is large: {record_header.h_len}", file=sys.stderr)
-                        print("A parser for xlog_rec_ext_header structure might be needed.", file=sys.stderr)
-                        print(f"journal_addr: {journal_addr}", file=sys.stderr)
-                        print(f"record_header: {record_header}", file=sys.stderr)
+                        self.warn(f"parse_journal xlog_rec_header.h_len is large: {record_header.h_len}")
+                        self.warn("A parser for xlog_rec_ext_header structure might be needed.")
+                        self.warn(f"journal_addr: {journal_addr}")
+                        self.warn(f"record_header: {record_header}")
                     log_records[record_header.h_lsn] = journal_addr
                 journal_addr += 0x200 + record_header.h_len  # record header size is 0x200
                 pbar.update(0x200 + record_header.h_len)
@@ -841,7 +842,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 xfs_trans_header = xfs_log_item = None
                 match record_header.h_fmt:
                     case xfs_structs.XLOG_FMT_UNKNOWN:
-                        print("Unknown log record format does not supported.", file=sys.stderr)
+                        self.warn("Unknown log record format does not supported.")
                         return
                     case xfs_structs.XLOG_FMT_LINUX_LE:
                         xfs_log_item = xfs_log_item_le
@@ -856,7 +857,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                         self.xfs_inode_log_format_64 = xfs_inode_log_format_64_be
                         self.xfs_buf_log_format = xfs_buf_log_format_be
                     case _:
-                        print(f"Unsupported log record format: {record_header.h_fmt}", file=sys.stderr)
+                        self.warn(f"Unsupported log record format: {record_header.h_fmt}")
 
                 # Concatenate log operations if there are incomplete log operations.
                 log_ops = self._concatenate_log_ops(log_ops)

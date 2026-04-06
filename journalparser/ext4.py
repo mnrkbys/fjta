@@ -25,7 +25,6 @@ import copy
 import json
 import math
 import re
-import sys
 from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -47,6 +46,7 @@ from journalparser.common import (
     JournalParserCommon,
     JournalTransaction,
     TimelineEventInfo,
+    emit_warning,
 )
 from journalparser.structs import ext4_structs
 from journalparser.structs.ext4_structs import (
@@ -198,7 +198,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
                 if name not in dent[inode_num]:
                     dent[inode_num].append(name)
             except UnicodeDecodeError:
-                print(f"set_dent_info UnicodeDecodeError: {dir_entry}", file=sys.stderr)
+                emit_warning(f"set_dent_info UnicodeDecodeError: {dir_entry}", "EXT4")
 
         # Set EntryInfo (file entry information)
         if dir_entry:
@@ -411,7 +411,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 break
 
         if idx > len(data) - tag_size and not found_last_tag:
-            print("_parse_descriptor_block_tags JBD2_FLAG_LAST_TAG not found.", file=sys.stderr)
+            self.warn("_parse_descriptor_block_tags JBD2_FLAG_LAST_TAG not found.")
 
         return tags
 

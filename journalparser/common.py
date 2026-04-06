@@ -6,6 +6,7 @@
 #
 
 import copy
+import sys
 from argparse import Namespace
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -20,6 +21,10 @@ import pyvmdk
 from construct import Container, StreamError
 from tqdm import tqdm as _tqdm
 from tqdm.std import tqdm as TqdmType
+
+
+def emit_warning(message: str, source: str) -> None:
+    print(f"WARNING[{source}]: {message}", file=sys.stderr)
 
 
 class FsTypes(IntEnum):
@@ -325,6 +330,10 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
             print(msg)
+
+    def warn(self, message: str) -> None:
+        source = self.fstype.name if self.fstype != FsTypes.UNKNOWN else type(self).__name__
+        emit_warning(message, source)
 
     def tqdm(self, *args, **kwargs) -> TqdmType:
         if "disable" not in kwargs:

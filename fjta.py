@@ -27,6 +27,10 @@ from typing import TextIO
 from journalparser.version import VERSION
 
 
+def emit_diagnostic(message: str, stream: TextIO, level: str = "ERROR") -> None:
+    print(f"{level}: {message}", file=stream)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate a timeline of file system activities from the filesystem journal log.",
@@ -73,19 +77,26 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace, err_stream: TextIO | None = None) -> int:
-    jp_module = importlib.import_module("journalparser.journalparser")
-    unsupported_image_error = jp_module.UnsupportedImageError
-    unsupported_filesystem_error = jp_module.UnsupportedFilesystemError
     target_err = err_stream if err_stream is not None else sys.stderr
 
     if not args.image:
-        print("Please specify a disk image file.", file=target_err)
+        emit_diagnostic("Please specify a disk image file.", target_err)
         return 1
+
+    try:
+        jp_module = importlib.import_module("journalparser.journalparser")
+    except ModuleNotFoundError as err:
+        missing_name = err.name or "unknown module"
+        emit_diagnostic(f"Required dependency is not available: {missing_name}", target_err)
+        return 1
+
+    unsupported_image_error = jp_module.UnsupportedImageError
+    unsupported_filesystem_error = jp_module.UnsupportedFilesystemError
 
     try:
         parser = jp_module.JournalParser(args.image, args)
     except (FileNotFoundError, ValueError, unsupported_image_error, unsupported_filesystem_error) as err:
-        print(err, file=target_err)
+        emit_diagnostic(str(err), target_err)
         return 1
     else:
         parser.parse_journal()

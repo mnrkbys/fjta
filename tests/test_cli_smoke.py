@@ -1,3 +1,4 @@
+import importlib
 from argparse import Namespace
 from io import StringIO
 
@@ -38,7 +39,7 @@ def test_run_without_image_returns_error_and_writes_stderr() -> None:
     exit_code = fjta.run(args, err_stream=err_stream)
 
     assert exit_code == 1
-    assert "Please specify a disk image file." in err_stream.getvalue()
+    assert "ERROR: Please specify a disk image file." in err_stream.getvalue()
 
 
 def test_main_without_image_returns_error(capsys: pytest.CaptureFixture[str]) -> None:
@@ -46,4 +47,19 @@ def test_main_without_image_returns_error(capsys: pytest.CaptureFixture[str]) ->
     captured = capsys.readouterr()
 
     assert exit_code == 1
-    assert "Please specify a disk image file." in captured.err
+    assert "ERROR: Please specify a disk image file." in captured.err
+
+
+def test_run_reports_missing_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _build_args(image="dummy.img")
+    err_stream = StringIO()
+
+    def _raise_module_not_found(_name: str) -> None:
+        raise ModuleNotFoundError("No module named 'pytsk3'", name="pytsk3")
+
+    monkeypatch.setattr(importlib, "import_module", _raise_module_not_found)
+
+    exit_code = fjta.run(args, err_stream=err_stream)
+
+    assert exit_code == 1
+    assert "ERROR: Required dependency is not available: pytsk3" in err_stream.getvalue()

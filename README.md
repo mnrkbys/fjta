@@ -262,7 +262,7 @@ Each line is a timeline event with the following fields.
 
 - Existing documented keys are intended to remain available.
 - New keys may be added in future versions.
-- Consumers should ignore unknown keys for forward compatibility.
+- Users and downstream tools should ignore unknown keys for forward compatibility.
 - The text format of `info` is informative and may change across versions.
 
 ### Diagnostics contract
@@ -270,6 +270,26 @@ Each line is a timeline event with the following fields.
 - Timeline events are written to `stdout` only.
 - Warnings, debug logs, and parser diagnostics are written to `stderr`.
 - `stderr` output is operator-oriented and not a stable machine-parseable API.
+
+## Development and Operations Notes
+
+### Parser boundaries (for contributors)
+
+- `JournalParser.parse_journal()` is the ingestion/parsing phase and must not emit timeline JSON.
+- `JournalParserCommon.infer_timeline_events()` builds timeline event objects.
+- `JournalParserCommon.emit_timeline_events()` is the only phase that serializes events to JSON Lines on `stdout`.
+- `JournalParserCommon.timeline()` orchestrates infer/emit; keep business logic in infer and output logic in emit.
+
+### Performance diagnostics (for operators)
+
+- Enable with `--debug`.
+- Performance logs are emitted to `stderr` with `PERF ...` prefixes.
+- Current stage logs include:
+  - `PERF parse_journal: <seconds>s`
+  - `PERF timeline.infer: <seconds>s; count=<events>`
+  - `PERF timeline.emit: <seconds>s; count=<events>`
+  - `PERF timeline.total: <seconds>s; count=<events>`
+- These diagnostics are for observation and tuning; they are not a stable API contract.
 
 ## Detecting data exfiltration by filtering and formatting with jq, awk, and column
 

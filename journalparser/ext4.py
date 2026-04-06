@@ -713,9 +713,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
         return self._generate_timeline_event_common(transaction, inode_num, working_entry, commit_ts)
 
-    def infer_timeline_events(self) -> list[TimelineEventInfo]:
+    def infer_timeline_events(self) -> Generator[TimelineEventInfo, None, None]:
         working_entries: dict[int, EntryInfoExt4] = {}
-        timeline_events: list[TimelineEventInfo] = []
         for tid in self.tqdm(sorted(self.transactions), desc="Generating timeline", unit="transaction", leave=False):
             transaction = self.transactions[tid]
             commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
@@ -731,12 +730,12 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 if not working_entries.get(inode_num):
                     working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
                     if timeline_event := self._generate_initial_timeline_event_common(
-                        tid,
+                        transaction,
                         inode_num,
                         transaction_entry,
                         commit_ts=commit_ts,
                     ):
-                        timeline_events.append(timeline_event)
+                        yield timeline_event
 
                     # Copy symlink target to working entry
                     if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
@@ -768,5 +767,4 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
                 # Generate timeline event for each inode
                 if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
-                    timeline_events.append(timeline_event)
-        return timeline_events
+                    yield timeline_event

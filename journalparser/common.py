@@ -9,7 +9,7 @@ import copy
 import json
 import sys
 from argparse import Namespace
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
@@ -700,11 +700,12 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
     def _generate_initial_timeline_event_common(
         self,
-        tid: int,
+        transaction: T,
         inode_num: int,
         transaction_entry: U,
         commit_ts: tuple[int, int] | None = None,
     ) -> TimelineEventInfo | None:
+        tid = transaction.tid
         msg = info = ""
         action = Actions.UNKNOWN
 
@@ -721,7 +722,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             action |= Actions.DELETE_INODE
             info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
             dtime_f = self._to_float_ts(d_sec, d_nsec)
-            self._refresh_directory_entries(inode_num, self.transactions[tid])
+            self._refresh_directory_entries(inode_num, transaction)
 
         if not (action & Actions.DELETE_INODE):
             if transaction_entry.crtime != 0 and self._detect_create(transaction_entry):
@@ -796,13 +797,16 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             info=info,
         )
 
-    def infer_timeline_events(self) -> list[TimelineEventInfo]:
+    def infer_timeline_events(self) -> Iterator[TimelineEventInfo]:
         msg = "Subclasses must implement infer_timeline_events."
         raise NotImplementedError(msg)
 
-    def emit_timeline_events(self, events: Iterable[TimelineEventInfo]) -> None:
+    def emit_timeline_events(self, events: Iterable[TimelineEventInfo]) -> int:
+        count = 0
         for event in events:
             print(json.dumps(event.to_dict()))
+            count += 1
+        return count
 
     def timeline(self) -> None:
         infer_start = perf_counter()
@@ -810,9 +814,9 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         infer_elapsed = perf_counter() - infer_start
 
         emit_start = perf_counter()
-        self.emit_timeline_events(events)
+        event_count = self.emit_timeline_events(events)
         emit_elapsed = perf_counter() - emit_start
 
-        self.perf("timeline.infer", infer_elapsed, count=len(events))
-        self.perf("timeline.emit", emit_elapsed, count=len(events))
-        self.perf("timeline.total", infer_elapsed + emit_elapsed, count=len(events))
+        self.perf("timeline.infer", infer_elapsed, count=event_count)
+        self.perf("timeline.emit", emit_elapsed, count=event_count)
+        self.perf("timeline.total", infer_elapsed + emit_elapsed, count=event_count)

@@ -979,9 +979,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
     def _generate_timeline_event(self, transaction: JournalTransactionXfs, inode_num: int, working_entry: EntryInfoXfs) -> TimelineEventInfo | None:
         return self._generate_timeline_event_common(transaction, inode_num, working_entry, commit_ts=None)
 
-    def infer_timeline_events(self) -> list[TimelineEventInfo]:
+    def infer_timeline_events(self) -> Generator[TimelineEventInfo, None, None]:
         working_entries: dict[int, EntryInfoXfs] = {}
-        timeline_events: list[TimelineEventInfo] = []
         for tid in self.tqdm(self.transactions, desc="Generating timeline", unit="transaction", leave=False):
             transaction = self.transactions[tid]
             self.update_directory_entries(transaction)
@@ -995,8 +994,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                 # Generate working_entriy and first timeline event for each inode
                 if not working_entries.get(inode_num):
                     working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
-                    if timeline_event := self._generate_initial_timeline_event_common(tid, inode_num, transaction_entry):
-                        timeline_events.append(timeline_event)
+                    if timeline_event := self._generate_initial_timeline_event_common(transaction, inode_num, transaction_entry):
+                        yield timeline_event
 
                     # Update working_entry with transaction_entry
                     working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
@@ -1010,8 +1009,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
                 # Generate timeline event for each inode
                 if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
-                    timeline_events.append(timeline_event)
-        return timeline_events
+                    yield timeline_event
 
 
 def parse_extent(ext: int) -> tuple[int, int, int, int]:

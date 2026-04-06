@@ -280,6 +280,17 @@ Each line is a timeline event with the following fields.
 - `JournalParserCommon.emit_timeline_events()` is the only phase that serializes events to JSON Lines on `stdout`.
 - `JournalParserCommon.timeline()` orchestrates infer/emit; keep business logic in infer and output logic in emit.
 
+### Running tests locally
+
+- Activate the virtual environment first.
+- Run tests with `python -m pytest` (recommended), not bare `pytest`.
+- This ensures tests run with the same interpreter/environment as FJTA and avoids module resolution differences.
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+```
+
 ### Performance diagnostics (for operators)
 
 - Enable with `--debug`.

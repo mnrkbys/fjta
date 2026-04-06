@@ -820,3 +820,6 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self.perf("timeline.infer", infer_elapsed, count=event_count)
         self.perf("timeline.emit", emit_elapsed, count=event_count)
         self.perf("timeline.total", infer_elapsed + emit_elapsed, count=event_count)
+
+        self.transactions.clear()
+        self.working_dents.clear()

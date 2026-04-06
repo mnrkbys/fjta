@@ -233,6 +233,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         self.fstype = fstype
         self.xfs_info_path: Path | None = None
         self.incomplete_log_ops: list[XfsLogOperation] = []
+        self.sorted_log_record_addrs: list[int] = []
 
     def _convert_block_to_absaddr(self, block_num: int, log2val: int) -> int:
         if self.sb_agblocks:
@@ -822,15 +823,23 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         pbar.close()
 
         sorted_log_records = dict(sorted(log_records.items()))  # Sort log records by h_lsn
+        self.sorted_log_record_addrs = list(sorted_log_records.values())
 
-        for journal_addr in self.tqdm(sorted_log_records.values(), desc="Parsing log records", unit="log record", leave=False):
+    def _iter_transactions_from_log_records(self) -> Generator[JournalTransactionXfs, None, None]:
+        if not self.sorted_log_record_addrs:
+            return
+
+        pending_transactions: dict[int, JournalTransactionXfs] = {}
+
+        for journal_addr in self.tqdm(self.sorted_log_record_addrs, desc="Parsing log records", unit="log record", leave=False):
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
             data = self._read_journal_data(journal_addr + 0x200, record_header.h_len)  # record header size is 0x200
             transaction_id, log_ops = self._parse_log_operations(data, record_header.h_cycle_data)
-            self.add_transaction(transaction_id)
-            transaction = self.transactions[transaction_id]
+            if transaction_id not in pending_transactions:
+                pending_transactions[transaction_id] = self._create_transaction(transaction_id)
+            transaction = pending_transactions[transaction_id]
             self.dbg_print(f"Number of log operations: record_header.h_num_logops = {record_header.h_num_logops}, log_ops = {len(log_ops)}")
             if len(log_ops) == record_header.h_num_logops:
                 self.dbg_print("All log operations are found.")
@@ -903,9 +912,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                                                 )
                                             )
                                             if inode:
-                                                self.transactions[transaction_id].set_inode_info(block_num, inode.di_ino, inode, eattrs)
-                                                self.transactions[transaction_id].entries[inode.di_ino].symlink_target = symlink_target
-                                                self.transactions[transaction_id].entries[inode.di_ino].device_number = device_number
+                                                transaction.set_inode_info(block_num, inode.di_ino, inode, eattrs)
+                                                transaction.entries[inode.di_ino].symlink_target = symlink_target
+                                                transaction.entries[inode.di_ino].device_number = device_number
                                                 dir_inode = inode.di_ino
                                                 if dir_entries:
                                                     for dir_entry in dir_entries:
@@ -918,7 +927,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                                                         )
                                                 # If dir_entries is "[]", it means the last directory entry was deleted. Only "." and ".." are left.
                                                 # If dir_entries is "None", it means the log operations don't contain directory entries (inode_log_format_64.ilf_fields does not have xfs_structs.XFS_ILOG_DDATA flag).
-                                                elif self.transactions[transaction_id].entries[inode.di_ino].file_type == FileTypes.DIRECTORY:
+                                                elif transaction.entries[inode.di_ino].file_type == FileTypes.DIRECTORY:
                                                     if dir_entries == []:
                                                         transaction.set_dent_info(block_num, dir_inode, parent_inode, 0, [])
                                                     elif dir_entries is None:
@@ -952,6 +961,14 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                         pbar_log_op.update(op_size)
                     pbar_log_op.close()
 
+            if any(log_op.op_header.oh_flags & (xfs_structs.XLOG_COMMIT_TRANS | xfs_structs.XLOG_UNMOUNT_TRANS) for log_op in log_ops):
+                completed_transaction = pending_transactions.pop(transaction_id, None)
+                if completed_transaction is not None:
+                    yield completed_transaction
+
+        for remaining_transaction in pending_transactions.values():
+            yield remaining_transaction
+
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         return ("file_type" in differences) or ("generation" in differences)
 
@@ -981,35 +998,44 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
     def infer_timeline_events(self) -> Generator[TimelineEventInfo, None, None]:
         working_entries: dict[int, EntryInfoXfs] = {}
-        for tid in self.tqdm(self.transactions, desc="Generating timeline", unit="transaction", leave=False):
-            transaction = self.transactions[tid]
-            self.update_directory_entries(transaction)
+        try:
+            if self.sorted_log_record_addrs:
+                transactions = self._iter_transactions_from_log_records()
+            else:
+                tids = list(self.transactions)
+                transactions = (self.transactions.pop(tid) for tid in tids)
 
-            for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (Transaction ID {tid})", unit="entry", leave=False):
-                # Skip special inodes except the root inode
-                # The root inode number is 128 and it is hanled as a normal inode here.
-                if not self.special_inodes and inode_num < 128:
-                    continue
-                transaction_entry = transaction.entries[inode_num]
-                # Generate working_entriy and first timeline event for each inode
-                if not working_entries.get(inode_num):
-                    working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
-                    if timeline_event := self._generate_initial_timeline_event_common(transaction, inode_num, transaction_entry):
+            for transaction in self.tqdm(transactions, desc="Generating timeline", unit="transaction", leave=False):
+                tid = transaction.tid
+                self.update_directory_entries(transaction)
+
+                for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (Transaction ID {tid})", unit="entry", leave=False):
+                    # Skip special inodes except the root inode
+                    # The root inode number is 128 and it is hanled as a normal inode here.
+                    if not self.special_inodes and inode_num < 128:
+                        continue
+                    transaction_entry = transaction.entries[inode_num]
+                    # Generate working_entriy and first timeline event for each inode
+                    if not working_entries.get(inode_num):
+                        working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
+                        if timeline_event := self._generate_initial_timeline_event_common(transaction, inode_num, transaction_entry):
+                            yield timeline_event
+
+                        # Update working_entry with transaction_entry
+                        working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
+
+                    # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
+                    # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
+                    if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
+                        tmp_entryinfo_source = copy.deepcopy(transaction.entries[inode_num].entryinfo_source)
+                        transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
+                        transaction.entries[inode_num].entryinfo_source = tmp_entryinfo_source | EntryInfoSource.WORKING_ENTRY
+
+                    # Generate timeline event for each inode
+                    if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
                         yield timeline_event
-
-                    # Update working_entry with transaction_entry
-                    working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
-
-                # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
-                # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
-                if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
-                    tmp_entryinfo_source = copy.deepcopy(transaction.entries[inode_num].entryinfo_source)
-                    transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
-                    transaction.entries[inode_num].entryinfo_source = tmp_entryinfo_source | EntryInfoSource.WORKING_ENTRY
-
-                # Generate timeline event for each inode
-                if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
-                    yield timeline_event
+        finally:
+            self.sorted_log_record_addrs.clear()
 
 
 def parse_extent(ext: int) -> tuple[int, int, int, int]:

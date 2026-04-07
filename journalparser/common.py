@@ -22,12 +22,111 @@ import pytsk3
 import pyvhdi
 import pyvmdk
 from construct import Container, StreamError
-from tqdm import tqdm as _tqdm
-from tqdm.std import tqdm as TqdmType
+from halo import Halo
 
 
 def emit_warning(message: str, source: str) -> None:
     print(f"WARNING[{source}]: {message}", file=sys.stderr)
+
+
+class NoOpSpinner:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def start(self) -> None:
+        return
+
+    def stop(self) -> None:
+        return
+
+    def update(self, step: int = 1) -> None:
+        _ = step
+
+    def close(self) -> None:
+        return
+
+    def succeed(self, text: str | None = None) -> None:
+        if text is not None:
+            self.text = text
+
+
+class HaloProgress:
+    _UNITS = ("", "K", "M", "G", "T", "P")
+
+    def __init__(
+        self,
+        parser: "JournalParserCommon",
+        text: str,
+        *,
+        total: int | None = None,
+        unit: str = "item",
+        unit_scale: bool = False,
+        enabled: bool = True,
+    ) -> None:
+        self.parser = parser
+        self.base_text = text
+        self.total = total
+        self.unit = unit
+        self.unit_scale = unit_scale
+        self.count = 0
+        self._started = False
+        self._visible = enabled and parser.output_path is not None and not parser.no_progress and parser._active_progress == 0
+        self._spinner = Halo(text=self._render_text(), spinner="dots", stream=sys.stderr) if self._visible else NoOpSpinner(text)
+
+    def _format_count(self, value: int) -> str:
+        if not self.unit_scale:
+            return str(value)
+
+        scaled = float(value)
+        unit_idx = 0
+        while scaled >= 1024 and unit_idx < len(self._UNITS) - 1:
+            scaled /= 1024
+            unit_idx += 1
+        suffix = f" {self._UNITS[unit_idx]}{self.unit}".rstrip()
+        return f"{scaled:.1f}{suffix}"
+
+    def _render_text(self) -> str:
+        if self.total is None:
+            return f"{self.base_text} ({self._format_count(self.count)} {self.unit})"
+        if self.unit_scale:
+            return f"{self.base_text} ({self._format_count(self.count)}/{self._format_count(self.total)})"
+        return f"{self.base_text} ({self._format_count(self.count)}/{self._format_count(self.total)} {self.unit})"
+
+    def _render_done_text(self) -> str:
+        done_text = f"{self.base_text} done"
+        if self.total is None:
+            return f"{done_text} ({self._format_count(self.count)} {self.unit})"
+        if self.unit_scale:
+            return f"{done_text} ({self._format_count(self.count)}/{self._format_count(self.total)})"
+        return f"{done_text} ({self._format_count(self.count)}/{self._format_count(self.total)} {self.unit})"
+
+    def start(self) -> None:
+        if self._started:
+            return
+        if self._visible:
+            self.parser._active_progress += 1
+            self._spinner.start()
+        self._started = True
+
+    def update(self, step: int = 1) -> None:
+        self.count += step
+        if self._visible:
+            self._spinner.text = self._render_text()
+
+    def succeed(self, text: str | None = None) -> None:
+        if not self._started:
+            self.start()
+        if text is None:
+            text = self._render_done_text()
+        if self._visible:
+            self._spinner.succeed(text)
+            self.parser._active_progress -= 1
+        else:
+            self._spinner.succeed(text)
+        self._started = False
+
+    def close(self) -> None:
+        self.succeed()
 
 
 class FsTypes(IntEnum):
@@ -321,6 +420,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self.debug = args.debug
         self.special_inodes = args.special_inodes
         self.no_progress = args.no_progress
+        self.output_path = Path(args.output).expanduser() if getattr(args, "output", None) else None
         # self.endian = self.fs_info.info.endian  # 1 = pytsk3.TSK_LIT_ENDIAN, 2 = pytsk3.TSK_BIG_ENDIAN
         self.block_size = 0
         self.journal_file = None  # Used in ext4
@@ -329,6 +429,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             self.journal_file = self.fs_info.open_meta(self.fs_info.info.journ_inum)
         self.transactions: dict[int, T] = {}  # dict[transaction_id, JournalTransaction]
         self.working_dents: dict[int, DentInfo] = {}  # dict[dir_inode, DentInfo]
+        self._active_progress = 0
 
     def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
@@ -344,10 +445,36 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         details = f"; count={count}" if count is not None else ""
         self.warn(f"PERF {stage}: {elapsed:.6f}s{details}")
 
-    def tqdm(self, *args, **kwargs) -> TqdmType:
-        if "disable" not in kwargs:
-            kwargs["disable"] = self.no_progress
-        return _tqdm(*args, **kwargs)
+    def progress(
+        self,
+        text: str,
+        *,
+        total: int | None = None,
+        unit: str = "item",
+        unit_scale: bool = False,
+        enabled: bool = True,
+    ) -> HaloProgress | NoOpSpinner:
+        return HaloProgress(self, text, total=total, unit=unit, unit_scale=unit_scale, enabled=enabled)
+
+    def progress_iter(
+        self,
+        iterable: Iterable[T] | Iterable[int],
+        *,
+        desc: str,
+        total: int | None = None,
+        unit: str = "item",
+        enabled: bool = True,
+    ) -> Iterator[T] | Iterator[int]:
+        if total is None and hasattr(iterable, "__len__"):
+            total = len(iterable)  # type: ignore[arg-type]
+        progress = self.progress(desc, total=total, unit=unit, enabled=enabled)
+        progress.start()
+        try:
+            for item in iterable:
+                yield item
+                progress.update()
+        finally:
+            progress.close()
 
     def read_data(self, address: int, size: int) -> bytes:
         if isinstance(self.img_info, ImageLike):
@@ -803,9 +930,17 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
     def emit_timeline_events(self, events: Iterable[TimelineEventInfo]) -> int:
         count = 0
-        for event in events:
-            print(json.dumps(event.to_dict()))
-            count += 1
+        if self.output_path is None:
+            for event in events:
+                print(json.dumps(event.to_dict()))
+                count += 1
+            return count
+
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.output_path.open("w", encoding="utf-8") as output_file:
+            for event in events:
+                print(json.dumps(event.to_dict()), file=output_file)
+                count += 1
         return count
 
     def timeline(self) -> None:

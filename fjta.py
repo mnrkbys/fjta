@@ -22,6 +22,7 @@ import argparse
 import importlib
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TextIO
 
 from journalparser.version import VERSION
@@ -64,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Hide progress bars. (Default: False)",
     )
     parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        help="Write timeline output to a file instead of stdout.",
+    )
+    parser.add_argument(
         "-v",
         "--version",
         action="version",
@@ -82,6 +90,12 @@ def run(args: argparse.Namespace, err_stream: TextIO | None = None) -> int:
     if not args.image:
         emit_diagnostic("Please specify a disk image file.", target_err)
         return 1
+
+    if args.output:
+        output_path = Path(args.output).expanduser()
+        if output_path.exists():
+            emit_diagnostic(f"Output file already exists: {output_path}", target_err, level="WARNING")
+            return 1
 
     try:
         jp_module = importlib.import_module("journalparser.journalparser")

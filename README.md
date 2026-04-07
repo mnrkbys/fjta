@@ -59,7 +59,7 @@ Tested with the following software and libraries:
 - [libewf-python](https://pypi.org/project/libewf-python/) 20240506
 - [libvmdk-python](https://pypi.org/project/libvmdk-python/) 20240510
 - [libvhdi-python](https://pypi.org/project/libvhdi-python/) 20240509
-- [tqdm](https://github.com/tqdm/tqdm) 4.67.1
+- [halo](https://github.com/manrajgrover/halo) 0.0.31
 
 ## Installation From Source
 
@@ -91,7 +91,7 @@ Finally, install required Python packages.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pytsk3 construct python-magic libewf-python libvmdk-python libvhdi-python
+pip install pytsk3 construct python-magic libewf-python libvmdk-python libvhdi-python halo
 ```
 
 ## Installation From Packages
@@ -118,7 +118,7 @@ Finally, install required Python packages.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install construct python-magic
+pip install construct python-magic halo
 ```
 
 ## Usage
@@ -128,6 +128,15 @@ pip install construct python-magic
 ```bash
 python ./fjta.py -i ~/ext4.img | jq
 ```
+
+### Save timeline to a file
+
+```bash
+python ./fjta.py -i ~/ext4.img --output timeline.ndjson
+```
+
+When `--output` is specified, timeline-generation progress spinners are shown by default.
+Use `--no-progress` to hide them.
 
 ### Filtering with an inode number
 

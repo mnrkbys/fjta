@@ -802,7 +802,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
         journal_addr = first_log_rec_addr
 
         # Find all log records and sort by h_lsn.
-        pbar = self.tqdm(total=self.sb_logblocks * self.block_size, desc="Finding log records", unit="B", unit_scale=True, leave=False)
+        pbar = self.progress("Finding log records", total=self.sb_logblocks * self.block_size, unit="B", unit_scale=True)
+        pbar.start()
         while journal_addr < first_log_rec_addr + self.journal_data_len:
             try:
                 data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
@@ -831,7 +832,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
         pending_transactions: dict[int, JournalTransactionXfs] = {}
 
-        for journal_addr in self.tqdm(self.sorted_log_record_addrs, desc="Parsing log records", unit="log record", leave=False):
+        for journal_addr in self.progress_iter(self.sorted_log_record_addrs, desc="Parsing log records", unit="log record"):
             data = self._read_journal_data(journal_addr, 0x200)  # record header size is 0x200
             record_header = xlog_rec_header.parse(data)
             self.dbg_print(f"record_header: {record_header}")
@@ -872,12 +873,12 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
 
                 idx = 0
                 if xfs_trans_header and xfs_log_item:
-                    pbar_log_op = self.tqdm(
+                    pbar_log_op = self.progress(
+                        f"Parsing log operations (LSN {record_header.h_lsn})",
                         total=len(log_ops),
-                        desc=f"Parsing log operations (LSN {record_header.h_lsn})",
                         unit="log operation",
-                        leave=False,
                     )
+                    pbar_log_op.start()
                     self.dbg_print(f"parse_journal log_ops: {log_ops}")
                     while idx < len(log_ops):
                         self.dbg_print(f"parse_journal log_ops[{idx}]: {log_ops[idx]}")
@@ -1002,14 +1003,18 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             if self.sorted_log_record_addrs:
                 transactions = self._iter_transactions_from_log_records()
             else:
-                tids = list(self.transactions)
-                transactions = (self.transactions.pop(tid) for tid in tids)
+                sequence_ids = list(self.transactions)
+                transactions = (self.transactions.pop(sequence_id) for sequence_id in sequence_ids)
 
-            for transaction in self.tqdm(transactions, desc="Generating timeline", unit="transaction", leave=False):
+            for transaction in self.progress_iter(transactions, desc="Generating timeline", unit="transaction"):
                 tid = transaction.tid
                 self.update_directory_entries(transaction)
 
-                for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (Transaction ID {tid})", unit="entry", leave=False):
+                for inode_num in self.progress_iter(
+                    transaction.entries,
+                    desc=f"Inferring file activity (Transaction ID {tid})",
+                    unit="entry",
+                ):
                     # Skip special inodes except the root inode
                     # The root inode number is 128 and it is hanled as a normal inode here.
                     if not self.special_inodes and inode_num < 128:

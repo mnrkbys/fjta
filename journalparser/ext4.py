@@ -550,7 +550,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         block_num = first_desc_block
 
         # Find all transactions in the journal and sort by h_sequence.
-        pbar = self.tqdm(total=journal_sb.s_maxlen - journal_sb.s_first, desc="Finding transactions", unit="block", leave=False)
+        pbar = self.progress("Finding transactions", total=journal_sb.s_maxlen - journal_sb.s_first, unit="block")
+        pbar.start()
         found_descriptor_block = False
         while block_num < first_desc_block + journal_sb.s_maxlen - journal_sb.s_first:
             read_blocks = 1
@@ -722,12 +723,16 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 transactions = (self.transactions.pop(tid) for tid in tids)
                 transaction_total = len(tids)
 
-            for transaction in self.tqdm(transactions, total=transaction_total, desc="Generating timeline", unit="transaction", leave=False):
+            for transaction in self.progress_iter(transactions, total=transaction_total, desc="Generating timeline", unit="transaction"):
                 tid = transaction.tid
                 commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
                 self.update_directory_entries(transaction)
 
-                for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (Transaction {tid})", unit="entry", leave=False):
+                for inode_num in self.progress_iter(
+                    transaction.entries,
+                    desc=f"Inferring file activity (Transaction {tid})",
+                    unit="entry",
+                ):
                     # Skip special inodes except the root inode
                     # The root inode number is 2 and it is hanled as a normal inode here.
                     if not self.special_inodes and inode_num <= 11 and inode_num != 2:

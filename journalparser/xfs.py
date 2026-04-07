@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025-2026 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
@@ -477,7 +477,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     dir2_sf_entry.namelen == 0
                     or dir2_sf_entry.ftype < xfs_structs.XFS_DIR3_FT_UNKNOWN
                     or dir2_sf_entry.ftype > xfs_structs.XFS_DIR3_FT_WHT
-                    or self._contains_control_chars_bytes(dir2_sf_entry.name)
+                    # or self._contains_control_chars_bytes(dir2_sf_entry.name)
                 ):
                     self.dbg_print(f"Invalid directory entry: {dir2_sf_entry}")
                     dir2_sf_entry = self._brute_force_xfs_dir2_sf_entry(data[idx:dsize])
@@ -643,9 +643,8 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             dir2_data_entry = xfs_dir2_data_entry.parse(tmp_data)
             self.dbg_print(f"_brute_force_xfs_dir2_data_entry dir2_data_entry: {dir2_data_entry}")
             if (
-                xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT
-                and dir2_data_entry.tag >= 64
-                and not self._contains_control_chars_bytes(dir2_data_entry.name)
+                xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT and dir2_data_entry.tag >= 64
+                # and not self._contains_control_chars_bytes(dir2_data_entry.name)
             ):
                 return dir2_data_entry
             namelen += 1
@@ -667,7 +666,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_UNKNOWN
                     or dir2_data_entry.ftype > xfs_structs.XFS_DIR3_FT_WHT
                     or dir2_data_entry.tag < 64
-                    or self._contains_control_chars_bytes(dir2_data_entry.name)
+                    # or self._contains_control_chars_bytes(dir2_data_entry.name)
                 ):
                     dir2_data_entry = self._brute_force_xfs_dir2_data_entry(data[idx:])
                     if dir2_data_entry is None:

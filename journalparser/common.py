@@ -656,6 +656,147 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 setattr(working_entry, field_name, differences[field_name][1])
         working_entry.names = copy.deepcopy(transaction_entry.names)
 
+    def _apply_crtime_change(
+        self,
+        diffs: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]],
+        working_entry: U,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        reuse_inode: bool,
+        commit_ts: tuple[int, int] | None,
+    ) -> tuple[str, Actions]:
+        if "crtime" not in diffs:
+            return info, action
+
+        cur_sec, new_sec = cast("tuple[int, int]", diffs["crtime"])
+        cur_nsec = working_entry.crtime_nanoseconds
+        new_nsec: int = cast("int", diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1])
+
+        if reuse_inode or self._detect_create(transaction_entry):
+            action |= Actions.CREATE_INODE
+            info = self._append_msg(info, self.format_timestamp(new_sec, new_nsec, label="Crtime", follow=False))
+            return info, action
+
+        msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, "Crtime")
+        if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
+            action |= Actions.TIMESTOMP
+            msg += " (Timestomp)"
+        elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
+            action |= Actions.TIMESTOMP
+            msg += " (Timestomp: commit_time < crtime)"
+        info = self._append_msg(info, msg)
+        return info, action
+
+    def _apply_mac_changes(
+        self,
+        diffs: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]],
+        working_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        reuse_inode: bool,
+        commit_ts: tuple[int, int] | None,
+    ) -> tuple[str, Actions]:
+        for field_name, field_action, label in (
+            ("atime", Actions.ACCESS, "Atime"),
+            ("ctime", Actions.CHANGE, "Ctime"),
+            ("mtime", Actions.MODIFY, "Mtime"),
+        ):
+            if reuse_inode or field_name not in diffs:
+                continue
+
+            action |= field_action
+            cur_sec, new_sec = cast("tuple[int, int]", diffs[field_name])
+            cur_nsec = getattr(working_entry, f"{field_name}_nanoseconds")
+            new_nsec: int = cast("int", diffs.get(f"{field_name}_nanoseconds", (cur_nsec, cur_nsec))[1])
+
+            msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, label)
+            if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
+                action |= Actions.TIMESTOMP
+                msg += " (Timestomp)"
+            elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
+                action |= Actions.TIMESTOMP
+                msg += f" (Timestomp: commit_time < {field_name})"
+            info = self._append_msg(info, msg)
+
+        return info, action
+
+    def _apply_non_timestamp_changes(
+        self,
+        transaction: T,
+        inode_num: int,
+        diffs: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]],
+        working_entry: U,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        reuse_inode: bool,
+    ) -> tuple[str, Actions]:
+        if not reuse_inode and "mode" in diffs:
+            cur, new = diffs["mode"]
+            action |= Actions.CHANGE_MODE
+            info = self._append_msg(info, f"Mode: {cur:04o} -> {new:04o}")
+
+        if not reuse_inode and "uid" in diffs:
+            cur, new = diffs["uid"]
+            action |= Actions.CHANGE_UID
+            info = self._append_msg(info, f"UID: {cur} -> {new}")
+        if not reuse_inode and "gid" in diffs:
+            cur, new = diffs["gid"]
+            action |= Actions.CHANGE_GID
+            info = self._append_msg(info, f"GID: {cur} -> {new}")
+
+        if not reuse_inode and "size" in diffs:
+            cur, new = cast("tuple[int, int]", diffs["size"])
+            action |= Actions.SIZE_UP if cur < new else Actions.SIZE_DOWN
+            info = self._append_msg(info, f"Size: {cur} -> {new}")
+
+        if "link_count" in diffs:
+            if working_entry.link_count < transaction_entry.link_count:
+                if working_entry.link_count == 0:
+                    action |= Actions.CREATE_INODE
+                action |= Actions.CREATE_HARDLINK
+            elif working_entry.link_count > transaction_entry.link_count:
+                if transaction_entry.link_count == 0:
+                    self._refresh_directory_entries(inode_num, transaction)
+                action |= Actions.DELETE_HARDLINK
+            info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
+
+        if not reuse_inode and "flags" in diffs:
+            cur, new = cast("tuple[int, int]", diffs["flags"])
+            action |= Actions.CHANGE_FLAGS
+            info = self._append_msg(info, f"Flags: 0x{cur:x} -> 0x{new:x}")
+            if add_info := self._apply_flag_changes(new):
+                info = self._append_msg(info, add_info, " ")
+
+        if not reuse_inode and "symlink_target" in diffs:
+            cur, new = diffs["symlink_target"]
+            action |= Actions.CHANGE_SYMLINK_TARGET
+            info = self._append_msg(info, f"Symlink Target: {cur} -> {new}")
+
+        if not reuse_inode and "extended_attributes" in diffs:
+            cur, new = cast("tuple[list[ExtendedAttribute], list[ExtendedAttribute]]", diffs["extended_attributes"])
+            action |= Actions.CHANGE_EA
+            added, removed = self._compare_extended_attributes(cur, new)
+            if added:
+                info = self._append_msg(info, f"Added EA: {', '.join(map(str, added))}")
+            if removed:
+                info = self._append_msg(info, f"Removed EA: {', '.join(map(str, removed))}")
+
+        if (
+            not reuse_inode
+            and "names" in diffs
+            and working_entry.link_count == transaction_entry.link_count
+            and working_entry.names != transaction_entry.names
+        ):
+            action |= Actions.MOVE
+            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
+
+        return info, action
+
     def _generate_timeline_event_common(
         self,
         transaction: T,
@@ -668,8 +809,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
         timeline_event = None
         action = Actions.UNKNOWN
-        msg = info = ""
-        reuse_inode = False
+        info = ""
 
         atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
         ctime_f = self._to_float_ts(transaction_entry.ctime, transaction_entry.ctime_nanoseconds)
@@ -697,122 +837,34 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         if not (action & Actions.DELETE_INODE) and reuse_inode:
             action |= Actions.REUSE_INODE
 
-        # per-field updates
         if not (action & Actions.DELETE_INODE) and diffs:
-            # crtime
-            if "crtime" in diffs:
-                cur_sec, new_sec = cast("tuple[int, int]", diffs["crtime"])
-                cur_nsec = working_entry.crtime_nanoseconds
-                new_nsec: int = cast("int", diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1])
-                # - Evaluated archive commands:
-                #       zip -r takeout.zip ./dummy_data/
-                #       rar a -r takeout.rar ./dummy_data/
-                #       7z a -r takeout.7z ./dummy_data/
-                #       tar cvzf takeout.tar.gz ./dummy_data/
-                #       gzip ./file1
-                #       bzip2 ./file1
-                if reuse_inode or self._detect_create(transaction_entry):
-                    action |= Actions.CREATE_INODE
-                    info = self._append_msg(info, self.format_timestamp(new_sec, new_nsec, label="Crtime", follow=False))
-                else:
-                    msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, "Crtime")
-                    if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
-                        action |= Actions.TIMESTOMP
-                        msg += " (Timestomp)"
-                    elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
-                        action |= Actions.TIMESTOMP
-                        msg += " (Timestomp: commit_time < crtime)"
-                    info = self._append_msg(info, msg)
-
-            # atime / ctime / mtime
-            for field_name, act, label in (
-                ("atime", Actions.ACCESS, "Atime"),
-                ("ctime", Actions.CHANGE, "Ctime"),
-                ("mtime", Actions.MODIFY, "Mtime"),
-            ):
-                if reuse_inode or field_name not in diffs:
-                    continue
-                action |= act
-                cur_sec, new_sec = cast("tuple[int, int]", diffs[field_name])
-                cur_nsec = getattr(working_entry, f"{field_name}_nanoseconds")
-                new_nsec: int = cast("int", diffs.get(f"{field_name}_nanoseconds", (cur_nsec, cur_nsec))[1])
-                msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, label)
-                if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
-                    action |= Actions.TIMESTOMP
-                    msg += " (Timestomp)"
-                elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
-                    action |= Actions.TIMESTOMP
-                    msg += f" (Timestomp: commit_time < {field_name})"
-                info = self._append_msg(info, msg)
-
-            # mode
-            if not reuse_inode and "mode" in diffs:
-                cur, new = diffs["mode"]
-                action |= Actions.CHANGE_MODE
-                info = self._append_msg(info, f"Mode: {cur:04o} -> {new:04o}")
-
-            # uid/gid
-            if not reuse_inode and "uid" in diffs:
-                cur, new = diffs["uid"]
-                action |= Actions.CHANGE_UID
-                info = self._append_msg(info, f"UID: {cur} -> {new}")
-            if not reuse_inode and "gid" in diffs:
-                cur, new = diffs["gid"]
-                action |= Actions.CHANGE_GID
-                info = self._append_msg(info, f"GID: {cur} -> {new}")
-
-            # size
-            if not reuse_inode and "size" in diffs:
-                cur, new = cast("tuple[int, int]", diffs["size"])
-                action |= Actions.SIZE_UP if cur < new else Actions.SIZE_DOWN
-                info = self._append_msg(info, f"Size: {cur} -> {new}")
-
-            # link_count
-            if "link_count" in diffs:
-                if working_entry.link_count < transaction_entry.link_count:
-                    if working_entry.link_count == 0:
-                        action |= Actions.CREATE_INODE
-                    action |= Actions.CREATE_HARDLINK
-                elif working_entry.link_count > transaction_entry.link_count:
-                    if transaction_entry.link_count == 0:
-                        self._refresh_directory_entries(inode_num, transaction)
-                    action |= Actions.DELETE_HARDLINK
-                info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
-
-            # flags
-            if not reuse_inode and "flags" in diffs:
-                cur, new = cast("tuple[int, int]", diffs["flags"])
-                action |= Actions.CHANGE_FLAGS
-                info = self._append_msg(info, f"Flags: 0x{cur:x} -> 0x{new:x}")
-                add_info = self._apply_flag_changes(new)
-                if add_info := self._apply_flag_changes(new):
-                    info = self._append_msg(info, add_info, " ")
-
-            # symlink_target
-            if not reuse_inode and "symlink_target" in diffs:
-                cur, new = diffs["symlink_target"]
-                action |= Actions.CHANGE_SYMLINK_TARGET
-                info = self._append_msg(info, f"Symlink Target: {cur} -> {new}")
-
-            # extended_attributes
-            if not reuse_inode and "extended_attributes" in diffs:
-                cur, new = cast("tuple[list[ExtendedAttribute], list[ExtendedAttribute]]", diffs["extended_attributes"])
-                action |= Actions.CHANGE_EA
-                added, removed = self._compare_extended_attributes(cur, new)
-                if added:
-                    info = self._append_msg(info, f"Added EA: {', '.join(map(str, added))}")
-                if removed:
-                    info = self._append_msg(info, f"Removed EA: {', '.join(map(str, removed))}")
-
-            # names
-            if (
-                not reuse_inode
-                and "names" in diffs
-                and working_entry.link_count == transaction_entry.link_count
-                and working_entry.names != transaction_entry.names
-            ):
-                action |= Actions.MOVE
-                info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
+            info, action = self._apply_crtime_change(
+                diffs,
+                working_entry,
+                transaction_entry,
+                info,
+                action,
+                reuse_inode=reuse_inode,
+                commit_ts=commit_ts,
+            )
+            info, action = self._apply_mac_changes(
+                diffs,
+                working_entry,
+                info,
+                action,
+                reuse_inode=reuse_inode,
+                commit_ts=commit_ts,
+            )
+            info, action = self._apply_non_timestamp_changes(
+                transaction,
+                inode_num,
+                diffs,
+                working_entry,
+                transaction_entry,
+                info,
+                action,
+                reuse_inode=reuse_inode,
+            )
 
         # delete hard link
         if not reuse_inode and working_entry.link_count > transaction_entry.link_count:

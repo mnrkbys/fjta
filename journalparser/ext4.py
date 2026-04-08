@@ -693,7 +693,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
         return False
 
-    def _detect_delete(self, transaction_entry: EntryInfoExt4, reuse_inode: bool) -> tuple[bool, int, int]:
+    def _detect_delete(self, transaction_entry: EntryInfoExt4, *, reuse_inode: bool) -> tuple[bool, int, int]:
         if transaction_entry.dtime != 0:
             if transaction_entry.dtime == transaction_entry.ctime:
                 return True, transaction_entry.ctime, transaction_entry.ctime_nanoseconds

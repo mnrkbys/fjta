@@ -59,7 +59,7 @@ Tested with the following software and libraries:
 - [libewf-python](https://pypi.org/project/libewf-python/) 20240506
 - [libvmdk-python](https://pypi.org/project/libvmdk-python/) 20240510
 - [libvhdi-python](https://pypi.org/project/libvhdi-python/) 20240509
-- [halo](https://github.com/manrajgrover/halo) 0.0.31
+- [yaspin](https://github.com/pavdmyt/yaspin) 3.4.0
 
 ## Installation From Source
 
@@ -91,7 +91,7 @@ Finally, install required Python packages.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pytsk3 construct python-magic libewf-python libvmdk-python libvhdi-python halo
+pip install pytsk3 construct python-magic libewf-python libvmdk-python libvhdi-python yaspin
 ```
 
 ## Installation From Packages
@@ -118,7 +118,7 @@ Finally, install required Python packages.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install construct python-magic halo
+pip install construct python-magic yaspin
 ```
 
 ## Usage

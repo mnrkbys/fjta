@@ -972,7 +972,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
     def _reuse_predicate(self, differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]) -> bool:
         return ("file_type" in differences) or ("generation" in differences)
 
-    def _detect_delete(self, transaction_entry: EntryInfoXfs, reuse_inode: bool) -> tuple[bool, int, int]:
+    def _detect_delete(self, transaction_entry: EntryInfoXfs, *, reuse_inode: bool) -> tuple[bool, int, int]:
         if (
             transaction_entry.file_type == FileTypes.UNKNOWN
             and transaction_entry.mode == 0

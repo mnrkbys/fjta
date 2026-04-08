@@ -22,7 +22,8 @@ import pytsk3
 import pyvhdi
 import pyvmdk
 from construct import Container, StreamError
-from halo import Halo
+from yaspin import yaspin
+from yaspin.spinners import Spinners
 
 
 def emit_warning(message: str, source: str) -> None:
@@ -32,6 +33,15 @@ def emit_warning(message: str, source: str) -> None:
 class NoOpSpinner:
     def __init__(self, text: str) -> None:
         self.text = text
+        self._color: str | None = None
+
+    @property
+    def color(self) -> str | None:
+        return self._color
+
+    @color.setter
+    def color(self, value: str | None) -> None:
+        self._color = value
 
     def start(self) -> None:
         return
@@ -45,13 +55,18 @@ class NoOpSpinner:
     def close(self) -> None:
         return
 
+    def ok(self, _symbol: str = "✔") -> None:
+        # No-op for compatibility with YaspinSpinner
+        return
+
     def succeed(self, text: str | None = None) -> None:
         if text is not None:
             self.text = text
 
 
-class HaloProgress:
+class YaspinSpinner:
     _UNITS = ("", "K", "M", "G", "T", "P")
+    _UNIT_SCALE_BASE = 1024
 
     def __init__(
         self,
@@ -70,8 +85,14 @@ class HaloProgress:
         self.unit_scale = unit_scale
         self.count = 0
         self._started = False
-        self._visible = enabled and parser.output_path is not None and not parser.no_progress and parser._active_progress == 0
-        self._spinner = Halo(text=self._render_text(), spinner="dots", stream=sys.stderr) if self._visible else NoOpSpinner(text)
+        self._visible = enabled and parser.output_path is not None and not parser.no_progress and not parser.has_active_progress()
+        self._spinner = yaspin(Spinners.dots, text=self._render_text(), stream=sys.stderr) if self._visible else NoOpSpinner(text)
+        if self._visible:
+            self._spinner.color = "green"
+
+    @property
+    def backend(self) -> object:
+        return self._spinner
 
     def _format_count(self, value: int) -> str:
         if not self.unit_scale:
@@ -79,8 +100,8 @@ class HaloProgress:
 
         scaled = float(value)
         unit_idx = 0
-        while scaled >= 1024 and unit_idx < len(self._UNITS) - 1:
-            scaled /= 1024
+        while scaled >= self._UNIT_SCALE_BASE and unit_idx < len(self._UNITS) - 1:
+            scaled /= self._UNIT_SCALE_BASE
             unit_idx += 1
         suffix = f" {self._UNITS[unit_idx]}{self.unit}".rstrip()
         return f"{scaled:.1f}{suffix}"
@@ -100,11 +121,19 @@ class HaloProgress:
             return f"{done_text} ({self._format_count(self.count)}/{self._format_count(self.total)})"
         return f"{done_text} ({self._format_count(self.count)}/{self._format_count(self.total)} {self.unit})"
 
+    @property
+    def text(self) -> str:
+        return self._spinner.text
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self._spinner.text = value
+
     def start(self) -> None:
         if self._started:
             return
         if self._visible:
-            self.parser._active_progress += 1
+            self.parser.begin_progress()
             self._spinner.start()
         self._started = True
 
@@ -118,11 +147,16 @@ class HaloProgress:
             self.start()
         if text is None:
             text = self._render_done_text()
+        if text is not None:
+            self._spinner.text = text
+            if self._visible:
+                self._spinner.color = "green"
         if self._visible:
-            self._spinner.succeed(text)
-            self.parser._active_progress -= 1
+            self._spinner.ok("✔")
         else:
-            self._spinner.succeed(text)
+            cast("NoOpSpinner", self._spinner).succeed(text)
+        if self._visible:
+            self.parser.end_progress()
         self._started = False
 
     def close(self) -> None:
@@ -360,14 +394,6 @@ class JournalTransaction[T: EntryInfo]:
         msg = "Subclasses must implement set_dent_info."
         raise NotImplementedError(msg)
 
-    # def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
-    #     names: dict[int, list[str]] = {}
-    #     for dir_inode, dir_entries in self.dents.items():
-    #         if tmp_names := dir_entries.find_names_by_inodenum(inode_num):
-    #             # names.update({dir_inode: tmp_names})
-    #             names[dir_inode] = tmp_names
-    #     return names
-
 
 @dataclass
 class TimelineEventInfo:
@@ -400,8 +426,6 @@ class TimelineEventInfo:
                 result[tl_field] = value.name
             elif isinstance(value, list) and all(isinstance(item, ExtendedAttribute) for item in value):
                 result[tl_field] = [item.to_dict() for item in value]
-            # elif isinstance(value, dict) and all(isinstance(entry, DentInfo) for entry in value.values()):
-            #     result[tl_field] = {dir_inode: entry.to_dict() for dir_inode, entry in value.items()}
             elif isinstance(value, DeviceNumber):
                 result[tl_field] = value.to_dict()
             else:
@@ -421,15 +445,22 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self.special_inodes = args.special_inodes
         self.no_progress = args.no_progress
         self.output_path = Path(args.output).expanduser() if getattr(args, "output", None) else None
-        # self.endian = self.fs_info.info.endian  # 1 = pytsk3.TSK_LIT_ENDIAN, 2 = pytsk3.TSK_BIG_ENDIAN
         self.block_size = 0
         self.journal_file = None  # Used in ext4
         if self.fs_info and self.fs_info.info.journ_inum != 0:
-            # self.block_size = self.fs_info.info.block_size
             self.journal_file = self.fs_info.open_meta(self.fs_info.info.journ_inum)
         self.transactions: dict[int, T] = {}  # dict[transaction_id, JournalTransaction]
         self.working_dents: dict[int, DentInfo] = {}  # dict[dir_inode, DentInfo]
         self._active_progress = 0
+
+    def has_active_progress(self) -> bool:
+        return self._active_progress > 0
+
+    def begin_progress(self) -> None:
+        self._active_progress += 1
+
+    def end_progress(self) -> None:
+        self._active_progress -= 1
 
     def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
@@ -453,8 +484,8 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         unit: str = "item",
         unit_scale: bool = False,
         enabled: bool = True,
-    ) -> HaloProgress | NoOpSpinner:
-        return HaloProgress(self, text, total=total, unit=unit, unit_scale=unit_scale, enabled=enabled)
+    ) -> YaspinSpinner:
+        return YaspinSpinner(self, text, total=total, unit=unit, unit_scale=unit_scale, enabled=enabled)
 
     def progress_iter(
         self,
@@ -464,7 +495,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         total: int | None = None,
         unit: str = "item",
         enabled: bool = True,
-    ) -> Iterator[T] | Iterator[int]:
+    ) -> Iterator[T | int]:
         if total is None and hasattr(iterable, "__len__"):
             total = len(iterable)  # type: ignore[arg-type]
         progress = self.progress(desc, total=total, unit=unit, enabled=enabled)
@@ -479,11 +510,8 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def read_data(self, address: int, size: int) -> bytes:
         if isinstance(self.img_info, ImageLike):
             return self.img_info.read(address, size)
-        # if isinstance(self.img_info, io.BufferedReader):  # io.BufferedReader might not be needed
-        #     self.img_info.seek(address, os.SEEK_SET)
-        #     return self.img_info.read(size)
-        # raise TypeError("img_info must be either pytsk3.Img_Info or io.BufferedReader.")
-        raise TypeError("img_info must be an ImageLike object.")
+        msg = "img_info must be an ImageLike object."
+        raise TypeError(msg)
 
     def _create_transaction(self, tid: int) -> T:
         msg = "Subclasses must implement _create_transaction."
@@ -501,20 +529,13 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def _compare_entry_fields(current_entry: U, new_entry: U) -> dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]:
         differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]] = {}
         for entry_field in current_entry.__dataclass_fields__:
-            if entry_field in ("entryinfo_source",):
+            if entry_field == "entryinfo_source":
                 continue
             current_value = getattr(current_entry, entry_field)
             new_value = getattr(new_entry, entry_field)
             if current_value != new_value:
                 differences[entry_field] = (current_value, new_value)
         return differences
-
-    # @staticmethod
-    # def _filter_differences(differences: list[tuple[str, any, any]], field: str) -> tuple[str, any, any] | tuple:
-    #     filterd_diffs = list(filter(lambda x: x[0] == field, differences))
-    #     if filterd_diffs:
-    #         return filterd_diffs[0]
-    #     return ()
 
     @staticmethod
     def _append_msg(orig_msg: str, msg: str, delimiter: str = "|") -> str:
@@ -552,6 +573,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         new_timestamp: int = 0,
         new_nanoseconds: int = 0,
         label: str = "Time",
+        *,
         follow: bool = True,
     ) -> str:
         msg = f"{label}: {datetime.fromtimestamp(timestamp, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{nanoseconds:09d} UTC"
@@ -613,7 +635,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             or (transaction_entry.crtime == transaction_entry.ctime and transaction_entry.atime == transaction_entry.mtime)  # gzip and bzip2
         )
 
-    def _detect_delete(self, transaction_entry: U, reuse_inode: bool) -> tuple[bool, int, int]:
+    def _detect_delete(self, transaction_entry: U, *, reuse_inode: bool) -> tuple[bool, int, int]:
         raise NotImplementedError
 
     def _timestomp(self, cur_ts: tuple[int, int], new_ts: tuple[int, int]) -> bool:
@@ -662,7 +684,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             self._refresh_directory_entries(inode_num, transaction)
 
         if "atime" in diffs or "ctime" in diffs or "mtime" in diffs:
-            is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode)
+            is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode=reuse_inode)
             if is_delete:
                 action |= Actions.DELETE_INODE
                 info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
@@ -844,7 +866,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
         transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
 
-        is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, False)
+        is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode=False)
         if is_delete:
             action |= Actions.DELETE_INODE
             info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))

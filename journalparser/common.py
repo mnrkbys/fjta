@@ -899,6 +899,80 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self._update_working_entry_fields(working_entry, transaction_entry, diffs)
         return timeline_event
 
+    def _apply_initial_create_and_link(
+        self,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+    ) -> tuple[str, Actions]:
+        if transaction_entry.crtime != 0 and self._detect_create(transaction_entry):
+            action |= Actions.CREATE_INODE
+            info = self._append_msg(
+                info,
+                self.format_timestamp(
+                    transaction_entry.crtime,
+                    transaction_entry.crtime_nanoseconds,
+                    label="Crtime",
+                    follow=False,
+                ),
+            )
+
+        if action & Actions.CREATE_INODE:
+            action |= Actions.CREATE_HARDLINK
+            if transaction_entry.link_count > 0:
+                info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
+
+        return info, action
+
+    def _apply_initial_mac_timestomp(
+        self,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        commit_ts: tuple[int, int] | None,
+    ) -> tuple[str, Actions]:
+        crtime_ts = (transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
+        for mac_type, mac_ts, mac_action, label in (
+            ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
+            ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
+            ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
+        ):
+            if self._timestomp(crtime_ts, mac_ts):
+                action |= mac_action | Actions.TIMESTOMP
+                msg = self.format_timestamp(
+                    mac_ts[0],
+                    mac_ts[1],
+                    label=label,
+                    follow=False,
+                )
+                msg += f" (Timestomp: {mac_type} < crtime)"
+                info = self._append_msg(info, msg)
+            elif commit_ts and self._timestomp(mac_ts, commit_ts):
+                action |= mac_action | Actions.TIMESTOMP
+                msg = self.format_timestamp(
+                    mac_ts[0],
+                    mac_ts[1],
+                    label=label,
+                    follow=False,
+                )
+                msg += f" (Timestomp: commit_time < {mac_type})"
+                info = self._append_msg(info, msg)
+
+        return info, action
+
+    def _apply_initial_flag_change(
+        self,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+    ) -> tuple[str, Actions]:
+        if add_info := self._apply_flag_changes(transaction_entry.flags):
+            action |= Actions.CHANGE_FLAGS
+            info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
+            info = self._append_msg(info, add_info, " ")
+        return info, action
+
     def _generate_initial_timeline_event_common(
         self,
         transaction: T,
@@ -907,7 +981,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         commit_ts: tuple[int, int] | None = None,
     ) -> TimelineEventInfo | None:
         tid = transaction.tid
-        msg = info = ""
+        info = ""
         action = Actions.UNKNOWN
 
         atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
@@ -926,51 +1000,14 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             self._refresh_directory_entries(inode_num, transaction)
 
         if not (action & Actions.DELETE_INODE):
-            if transaction_entry.crtime != 0 and self._detect_create(transaction_entry):
-                action |= Actions.CREATE_INODE
-                msg = self.format_timestamp(
-                    transaction_entry.crtime,
-                    transaction_entry.crtime_nanoseconds,
-                    label="Crtime",
-                    follow=False,
-                )
-                info = self._append_msg(info, msg)
-
-            if action & Actions.CREATE_INODE:
-                action |= Actions.CREATE_HARDLINK
-                if transaction_entry.link_count > 0:
-                    info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
-
-            for mac_type, mac_ts, act, label in (
-                ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
-                ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
-                ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
-            ):
-                if self._timestomp((transaction_entry.crtime, transaction_entry.crtime_nanoseconds), mac_ts):
-                    action |= act | Actions.TIMESTOMP
-                    msg = self.format_timestamp(
-                        mac_ts[0],
-                        mac_ts[1],
-                        label=label,
-                        follow=False,
-                    )
-                    msg += f" (Timestomp: {mac_type} < crtime)"
-                    info = self._append_msg(info, msg)
-                elif commit_ts and self._timestomp(mac_ts, commit_ts):
-                    action |= act | Actions.TIMESTOMP
-                    msg = self.format_timestamp(
-                        mac_ts[0],
-                        mac_ts[1],
-                        label=label,
-                        follow=False,
-                    )
-                    msg += f" (Timestomp: commit_time < {mac_type})"
-                    info = self._append_msg(info, msg)
-
-            if add_info := self._apply_flag_changes(transaction_entry.flags):
-                action |= Actions.CHANGE_FLAGS
-                info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
-                info = self._append_msg(info, add_info, " ")
+            info, action = self._apply_initial_create_and_link(transaction_entry, info, action)
+            info, action = self._apply_initial_mac_timestomp(
+                transaction_entry,
+                info,
+                action,
+                commit_ts=commit_ts,
+            )
+            info, action = self._apply_initial_flag_change(transaction_entry, info, action)
 
         if action == Actions.UNKNOWN:
             return None

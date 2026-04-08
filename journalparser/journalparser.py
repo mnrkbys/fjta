@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025-2026 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
@@ -8,6 +8,7 @@
 import contextlib
 from argparse import Namespace
 from pathlib import Path
+from time import perf_counter
 from typing import Self
 
 import magic
@@ -184,7 +185,11 @@ class JournalParser:
         self.fs_info = None
 
     def parse_journal(self) -> None:
+        start = perf_counter()
         self.journal_parser.parse_journal()
+        elapsed = perf_counter() - start
+        if getattr(self.journal_parser, "debug", False):
+            self.journal_parser.warn(f"PERF parse_journal: {elapsed:.6f}s")
 
     def timeline(self) -> None:
         self.journal_parser.timeline()

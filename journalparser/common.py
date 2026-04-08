@@ -1,16 +1,20 @@
 #
-# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025-2026 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
 #
 
 import copy
+import json
+import sys
 from argparse import Namespace
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Flag, IntEnum, auto
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol, cast, runtime_checkable
 
 import pyewf
@@ -18,8 +22,147 @@ import pytsk3
 import pyvhdi
 import pyvmdk
 from construct import Container, StreamError
-from tqdm import tqdm as _tqdm
-from tqdm.std import tqdm as TqdmType
+from yaspin import Spinner, yaspin
+from yaspin.core import Yaspin
+from yaspin.spinners import Spinners
+
+
+def emit_warning(message: str, source: str) -> None:
+    print(f"WARNING[{source}]: {message}", file=sys.stderr)
+
+
+class NoOpSpinner:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._color: str | None = None
+
+    @property
+    def color(self) -> str | None:
+        return self._color
+
+    @color.setter
+    def color(self, value: str | None) -> None:
+        self._color = value
+
+    def start(self) -> None:
+        return
+
+    def stop(self) -> None:
+        return
+
+    def update(self, step: int = 1) -> None:
+        _ = step
+
+    def close(self) -> None:
+        return
+
+    def ok(self, _symbol: str = "✔") -> None:
+        # No-op for compatibility with YaspinSpinner
+        return
+
+    def succeed(self, text: str | None = None) -> None:
+        if text is not None:
+            self.text = text
+
+
+class YaspinSpinner:
+    _UNITS = ("", "K", "M", "G", "T", "P")
+    _UNIT_SCALE_BASE = 1024
+
+    def __init__(
+        self,
+        parser: "JournalParserCommon",
+        text: str,
+        *,
+        total: int | None = None,
+        unit: str = "item",
+        unit_scale: bool = False,
+        enabled: bool = True,
+    ) -> None:
+        self.parser = parser
+        self.base_text = text
+        self.total = total
+        self.unit = unit
+        self.unit_scale = unit_scale
+        self.count = 0
+        self._started = False
+        self._visible = enabled and parser.output_path is not None and not parser.no_progress and not parser.has_active_progress()
+        self._spinner = self._build_backend(text)
+
+    def _build_backend(self, fallback_text: str) -> Yaspin | NoOpSpinner:
+        if not self._visible:
+            return NoOpSpinner(fallback_text)
+        spinner = yaspin(
+            Spinner(frames=Spinners.dots.frames, interval=200),
+            text=self._render_status_text(done=False),
+            stream=sys.stderr,
+        )
+        spinner.color = "green"
+        return spinner
+
+    @property
+    def backend(self) -> object:
+        return self._spinner
+
+    def _format_count(self, value: int) -> str:
+        if not self.unit_scale:
+            return str(value)
+
+        scaled = float(value)
+        unit_idx = 0
+        while scaled >= self._UNIT_SCALE_BASE and unit_idx < len(self._UNITS) - 1:
+            scaled /= self._UNIT_SCALE_BASE
+            unit_idx += 1
+        suffix = f" {self._UNITS[unit_idx]}{self.unit}".rstrip()
+        return f"{scaled:.1f}{suffix}"
+
+    def _render_status_text(self, *, done: bool) -> str:
+        title = f"{self.base_text} done" if done else self.base_text
+        if self.total is None:
+            return f"{title} ({self._format_count(self.count)} {self.unit})"
+        if self.unit_scale:
+            return f"{title} ({self._format_count(self.count)}/{self._format_count(self.total)})"
+        return f"{title} ({self._format_count(self.count)}/{self._format_count(self.total)} {self.unit})"
+
+    @property
+    def text(self) -> str:
+        return self._spinner.text
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self._spinner.text = value
+
+    def start(self) -> None:
+        if self._started:
+            return
+        if self._visible:
+            self.parser.begin_progress()
+            self._spinner.start()
+        self._started = True
+
+    def update(self, step: int = 1) -> None:
+        self.count += step
+        if self._visible:
+            self._spinner.text = self._render_status_text(done=False)
+
+    def succeed(self, text: str | None = None) -> None:
+        if not self._started:
+            self.start()
+        if text is None:
+            text = self._render_status_text(done=True)
+        if text is not None:
+            self._spinner.text = text
+        if self._visible:
+            self._spinner.color = "green"
+            self._spinner.ok("✔")
+        elif isinstance(self._spinner, NoOpSpinner):
+            self._spinner.succeed(text)
+        if self._visible:
+            self.parser.end_progress()
+        self._started = False
+
+    def close(self) -> None:
+        self.succeed()
 
 
 class FsTypes(IntEnum):
@@ -253,14 +396,6 @@ class JournalTransaction[T: EntryInfo]:
         msg = "Subclasses must implement set_dent_info."
         raise NotImplementedError(msg)
 
-    # def retrieve_names_by_inodenum(self, inode_num: int) -> dict[int, list[str]]:
-    #     names: dict[int, list[str]] = {}
-    #     for dir_inode, dir_entries in self.dents.items():
-    #         if tmp_names := dir_entries.find_names_by_inodenum(inode_num):
-    #             # names.update({dir_inode: tmp_names})
-    #             names[dir_inode] = tmp_names
-    #     return names
-
 
 @dataclass
 class TimelineEventInfo:
@@ -293,8 +428,6 @@ class TimelineEventInfo:
                 result[tl_field] = value.name
             elif isinstance(value, list) and all(isinstance(item, ExtendedAttribute) for item in value):
                 result[tl_field] = [item.to_dict() for item in value]
-            # elif isinstance(value, dict) and all(isinstance(entry, DentInfo) for entry in value.values()):
-            #     result[tl_field] = {dir_inode: entry.to_dict() for dir_inode, entry in value.items()}
             elif isinstance(value, DeviceNumber):
                 result[tl_field] = value.to_dict()
             else:
@@ -313,32 +446,74 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self.debug = args.debug
         self.special_inodes = args.special_inodes
         self.no_progress = args.no_progress
-        # self.endian = self.fs_info.info.endian  # 1 = pytsk3.TSK_LIT_ENDIAN, 2 = pytsk3.TSK_BIG_ENDIAN
+        self.output_path = Path(args.output).expanduser() if getattr(args, "output", None) else None
         self.block_size = 0
         self.journal_file = None  # Used in ext4
         if self.fs_info and self.fs_info.info.journ_inum != 0:
-            # self.block_size = self.fs_info.info.block_size
             self.journal_file = self.fs_info.open_meta(self.fs_info.info.journ_inum)
         self.transactions: dict[int, T] = {}  # dict[transaction_id, JournalTransaction]
         self.working_dents: dict[int, DentInfo] = {}  # dict[dir_inode, DentInfo]
+        self._active_progress = 0
+
+    def has_active_progress(self) -> bool:
+        return self._active_progress > 0
+
+    def begin_progress(self) -> None:
+        self._active_progress += 1
+
+    def end_progress(self) -> None:
+        self._active_progress -= 1
 
     def dbg_print(self, msg: str | Container | StreamError) -> None:
         if self.debug:
             print(msg)
 
-    def tqdm(self, *args, **kwargs) -> TqdmType:
-        if "disable" not in kwargs:
-            kwargs["disable"] = self.no_progress
-        return _tqdm(*args, **kwargs)
+    def warn(self, message: str) -> None:
+        source = self.fstype.name if self.fstype != FsTypes.UNKNOWN else type(self).__name__
+        emit_warning(message, source)
+
+    def perf(self, stage: str, elapsed: float, *, count: int | None = None) -> None:
+        if not self.debug:
+            return
+        details = f"; count={count}" if count is not None else ""
+        self.warn(f"PERF {stage}: {elapsed:.6f}s{details}")
+
+    def progress(
+        self,
+        text: str,
+        *,
+        total: int | None = None,
+        unit: str = "item",
+        unit_scale: bool = False,
+        enabled: bool = True,
+    ) -> YaspinSpinner:
+        return YaspinSpinner(self, text, total=total, unit=unit, unit_scale=unit_scale, enabled=enabled)
+
+    def progress_iter(
+        self,
+        iterable: Iterable[T] | Iterable[int],
+        *,
+        desc: str,
+        total: int | None = None,
+        unit: str = "item",
+        enabled: bool = True,
+    ) -> Iterator[T | int]:
+        if total is None and hasattr(iterable, "__len__"):
+            total = len(iterable)  # type: ignore[arg-type]
+        progress = self.progress(desc, total=total, unit=unit, enabled=enabled)
+        progress.start()
+        try:
+            for item in iterable:
+                yield item
+                progress.update()
+        finally:
+            progress.close()
 
     def read_data(self, address: int, size: int) -> bytes:
         if isinstance(self.img_info, ImageLike):
             return self.img_info.read(address, size)
-        # if isinstance(self.img_info, io.BufferedReader):  # io.BufferedReader might not be needed
-        #     self.img_info.seek(address, os.SEEK_SET)
-        #     return self.img_info.read(size)
-        # raise TypeError("img_info must be either pytsk3.Img_Info or io.BufferedReader.")
-        raise TypeError("img_info must be an ImageLike object.")
+        msg = "img_info must be an ImageLike object."
+        raise TypeError(msg)
 
     def _create_transaction(self, tid: int) -> T:
         msg = "Subclasses must implement _create_transaction."
@@ -356,20 +531,13 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
     def _compare_entry_fields(current_entry: U, new_entry: U) -> dict[str, tuple[EntryInfoTypes, EntryInfoTypes]]:
         differences: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]] = {}
         for entry_field in current_entry.__dataclass_fields__:
-            if entry_field in ("entryinfo_source",):
+            if entry_field == "entryinfo_source":
                 continue
             current_value = getattr(current_entry, entry_field)
             new_value = getattr(new_entry, entry_field)
             if current_value != new_value:
                 differences[entry_field] = (current_value, new_value)
         return differences
-
-    # @staticmethod
-    # def _filter_differences(differences: list[tuple[str, any, any]], field: str) -> tuple[str, any, any] | tuple:
-    #     filterd_diffs = list(filter(lambda x: x[0] == field, differences))
-    #     if filterd_diffs:
-    #         return filterd_diffs[0]
-    #     return ()
 
     @staticmethod
     def _append_msg(orig_msg: str, msg: str, delimiter: str = "|") -> str:
@@ -407,6 +575,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         new_timestamp: int = 0,
         new_nanoseconds: int = 0,
         label: str = "Time",
+        *,
         follow: bool = True,
     ) -> str:
         msg = f"{label}: {datetime.fromtimestamp(timestamp, tz=UTC).strftime('%Y-%m-%d %H:%M:%S')}.{nanoseconds:09d} UTC"
@@ -468,7 +637,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             or (transaction_entry.crtime == transaction_entry.ctime and transaction_entry.atime == transaction_entry.mtime)  # gzip and bzip2
         )
 
-    def _detect_delete(self, transaction_entry: U, reuse_inode: bool) -> tuple[bool, int, int]:
+    def _detect_delete(self, transaction_entry: U, *, reuse_inode: bool) -> tuple[bool, int, int]:
         raise NotImplementedError
 
     def _timestomp(self, cur_ts: tuple[int, int], new_ts: tuple[int, int]) -> bool:
@@ -489,6 +658,147 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
                 setattr(working_entry, field_name, differences[field_name][1])
         working_entry.names = copy.deepcopy(transaction_entry.names)
 
+    def _apply_crtime_change(
+        self,
+        diffs: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]],
+        working_entry: U,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        reuse_inode: bool,
+        commit_ts: tuple[int, int] | None,
+    ) -> tuple[str, Actions]:
+        if "crtime" not in diffs:
+            return info, action
+
+        cur_sec, new_sec = cast("tuple[int, int]", diffs["crtime"])
+        cur_nsec = working_entry.crtime_nanoseconds
+        new_nsec: int = cast("int", diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1])
+
+        if reuse_inode or self._detect_create(transaction_entry):
+            action |= Actions.CREATE_INODE
+            info = self._append_msg(info, self.format_timestamp(new_sec, new_nsec, label="Crtime", follow=False))
+            return info, action
+
+        msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, "Crtime")
+        if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
+            action |= Actions.TIMESTOMP
+            msg += " (Timestomp)"
+        elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
+            action |= Actions.TIMESTOMP
+            msg += " (Timestomp: commit_time < crtime)"
+        info = self._append_msg(info, msg)
+        return info, action
+
+    def _apply_mac_changes(
+        self,
+        diffs: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]],
+        working_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        reuse_inode: bool,
+        commit_ts: tuple[int, int] | None,
+    ) -> tuple[str, Actions]:
+        for field_name, field_action, label in (
+            ("atime", Actions.ACCESS, "Atime"),
+            ("ctime", Actions.CHANGE, "Ctime"),
+            ("mtime", Actions.MODIFY, "Mtime"),
+        ):
+            if reuse_inode or field_name not in diffs:
+                continue
+
+            action |= field_action
+            cur_sec, new_sec = cast("tuple[int, int]", diffs[field_name])
+            cur_nsec = getattr(working_entry, f"{field_name}_nanoseconds")
+            new_nsec: int = cast("int", diffs.get(f"{field_name}_nanoseconds", (cur_nsec, cur_nsec))[1])
+
+            msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, label)
+            if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
+                action |= Actions.TIMESTOMP
+                msg += " (Timestomp)"
+            elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
+                action |= Actions.TIMESTOMP
+                msg += f" (Timestomp: commit_time < {field_name})"
+            info = self._append_msg(info, msg)
+
+        return info, action
+
+    def _apply_non_timestamp_changes(
+        self,
+        transaction: T,
+        inode_num: int,
+        diffs: dict[str, tuple[EntryInfoTypes, EntryInfoTypes]],
+        working_entry: U,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        reuse_inode: bool,
+    ) -> tuple[str, Actions]:
+        if not reuse_inode and "mode" in diffs:
+            cur, new = diffs["mode"]
+            action |= Actions.CHANGE_MODE
+            info = self._append_msg(info, f"Mode: {cur:04o} -> {new:04o}")
+
+        if not reuse_inode and "uid" in diffs:
+            cur, new = diffs["uid"]
+            action |= Actions.CHANGE_UID
+            info = self._append_msg(info, f"UID: {cur} -> {new}")
+        if not reuse_inode and "gid" in diffs:
+            cur, new = diffs["gid"]
+            action |= Actions.CHANGE_GID
+            info = self._append_msg(info, f"GID: {cur} -> {new}")
+
+        if not reuse_inode and "size" in diffs:
+            cur, new = cast("tuple[int, int]", diffs["size"])
+            action |= Actions.SIZE_UP if cur < new else Actions.SIZE_DOWN
+            info = self._append_msg(info, f"Size: {cur} -> {new}")
+
+        if "link_count" in diffs:
+            if working_entry.link_count < transaction_entry.link_count:
+                if working_entry.link_count == 0:
+                    action |= Actions.CREATE_INODE
+                action |= Actions.CREATE_HARDLINK
+            elif working_entry.link_count > transaction_entry.link_count:
+                if transaction_entry.link_count == 0:
+                    self._refresh_directory_entries(inode_num, transaction)
+                action |= Actions.DELETE_HARDLINK
+            info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
+
+        if not reuse_inode and "flags" in diffs:
+            cur, new = cast("tuple[int, int]", diffs["flags"])
+            action |= Actions.CHANGE_FLAGS
+            info = self._append_msg(info, f"Flags: 0x{cur:x} -> 0x{new:x}")
+            if add_info := self._apply_flag_changes(new):
+                info = self._append_msg(info, add_info, " ")
+
+        if not reuse_inode and "symlink_target" in diffs:
+            cur, new = diffs["symlink_target"]
+            action |= Actions.CHANGE_SYMLINK_TARGET
+            info = self._append_msg(info, f"Symlink Target: {cur} -> {new}")
+
+        if not reuse_inode and "extended_attributes" in diffs:
+            cur, new = cast("tuple[list[ExtendedAttribute], list[ExtendedAttribute]]", diffs["extended_attributes"])
+            action |= Actions.CHANGE_EA
+            added, removed = self._compare_extended_attributes(cur, new)
+            if added:
+                info = self._append_msg(info, f"Added EA: {', '.join(map(str, added))}")
+            if removed:
+                info = self._append_msg(info, f"Removed EA: {', '.join(map(str, removed))}")
+
+        if (
+            not reuse_inode
+            and "names" in diffs
+            and working_entry.link_count == transaction_entry.link_count
+            and working_entry.names != transaction_entry.names
+        ):
+            action |= Actions.MOVE
+            info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
+
+        return info, action
+
     def _generate_timeline_event_common(
         self,
         transaction: T,
@@ -501,8 +811,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
 
         timeline_event = None
         action = Actions.UNKNOWN
-        msg = info = ""
-        reuse_inode = False
+        info = ""
 
         atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
         ctime_f = self._to_float_ts(transaction_entry.ctime, transaction_entry.ctime_nanoseconds)
@@ -517,7 +826,7 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
             self._refresh_directory_entries(inode_num, transaction)
 
         if "atime" in diffs or "ctime" in diffs or "mtime" in diffs:
-            is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode)
+            is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode=reuse_inode)
             if is_delete:
                 action |= Actions.DELETE_INODE
                 info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
@@ -530,122 +839,34 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         if not (action & Actions.DELETE_INODE) and reuse_inode:
             action |= Actions.REUSE_INODE
 
-        # per-field updates
         if not (action & Actions.DELETE_INODE) and diffs:
-            # crtime
-            if "crtime" in diffs:
-                cur_sec, new_sec = cast("tuple[int, int]", diffs["crtime"])
-                cur_nsec = working_entry.crtime_nanoseconds
-                new_nsec: int = cast("int", diffs.get("crtime_nanoseconds", (cur_nsec, cur_nsec))[1])
-                # - Evaluated archive commands:
-                #       zip -r takeout.zip ./dummy_data/
-                #       rar a -r takeout.rar ./dummy_data/
-                #       7z a -r takeout.7z ./dummy_data/
-                #       tar cvzf takeout.tar.gz ./dummy_data/
-                #       gzip ./file1
-                #       bzip2 ./file1
-                if reuse_inode or self._detect_create(transaction_entry):
-                    action |= Actions.CREATE_INODE
-                    info = self._append_msg(info, self.format_timestamp(new_sec, new_nsec, label="Crtime", follow=False))
-                else:
-                    msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, "Crtime")
-                    if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
-                        action |= Actions.TIMESTOMP
-                        msg += " (Timestomp)"
-                    elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
-                        action |= Actions.TIMESTOMP
-                        msg += " (Timestomp: commit_time < crtime)"
-                    info = self._append_msg(info, msg)
-
-            # atime / ctime / mtime
-            for field_name, act, label in (
-                ("atime", Actions.ACCESS, "Atime"),
-                ("ctime", Actions.CHANGE, "Ctime"),
-                ("mtime", Actions.MODIFY, "Mtime"),
-            ):
-                if reuse_inode or field_name not in diffs:
-                    continue
-                action |= act
-                cur_sec, new_sec = cast("tuple[int, int]", diffs[field_name])
-                cur_nsec = getattr(working_entry, f"{field_name}_nanoseconds")
-                new_nsec: int = cast("int", diffs.get(f"{field_name}_nanoseconds", (cur_nsec, cur_nsec))[1])
-                msg = self.format_timestamp(cur_sec, cur_nsec, new_sec, new_nsec, label)
-                if self._timestomp((cur_sec, cur_nsec), (new_sec, new_nsec)):
-                    action |= Actions.TIMESTOMP
-                    msg += " (Timestomp)"
-                elif commit_ts and self._timestomp((new_sec, new_nsec), commit_ts):
-                    action |= Actions.TIMESTOMP
-                    msg += f" (Timestomp: commit_time < {field_name})"
-                info = self._append_msg(info, msg)
-
-            # mode
-            if not reuse_inode and "mode" in diffs:
-                cur, new = diffs["mode"]
-                action |= Actions.CHANGE_MODE
-                info = self._append_msg(info, f"Mode: {cur:04o} -> {new:04o}")
-
-            # uid/gid
-            if not reuse_inode and "uid" in diffs:
-                cur, new = diffs["uid"]
-                action |= Actions.CHANGE_UID
-                info = self._append_msg(info, f"UID: {cur} -> {new}")
-            if not reuse_inode and "gid" in diffs:
-                cur, new = diffs["gid"]
-                action |= Actions.CHANGE_GID
-                info = self._append_msg(info, f"GID: {cur} -> {new}")
-
-            # size
-            if not reuse_inode and "size" in diffs:
-                cur, new = cast("tuple[int, int]", diffs["size"])
-                action |= Actions.SIZE_UP if cur < new else Actions.SIZE_DOWN
-                info = self._append_msg(info, f"Size: {cur} -> {new}")
-
-            # link_count
-            if "link_count" in diffs:
-                if working_entry.link_count < transaction_entry.link_count:
-                    if working_entry.link_count == 0:
-                        action |= Actions.CREATE_INODE
-                    action |= Actions.CREATE_HARDLINK
-                elif working_entry.link_count > transaction_entry.link_count:
-                    if transaction_entry.link_count == 0:
-                        self._refresh_directory_entries(inode_num, transaction)
-                    action |= Actions.DELETE_HARDLINK
-                info = self._append_msg(info, f"Link Count: {working_entry.link_count} -> {transaction_entry.link_count}")
-
-            # flags
-            if not reuse_inode and "flags" in diffs:
-                cur, new = cast("tuple[int, int]", diffs["flags"])
-                action |= Actions.CHANGE_FLAGS
-                info = self._append_msg(info, f"Flags: 0x{cur:x} -> 0x{new:x}")
-                add_info = self._apply_flag_changes(new)
-                if add_info := self._apply_flag_changes(new):
-                    info = self._append_msg(info, add_info, " ")
-
-            # symlink_target
-            if not reuse_inode and "symlink_target" in diffs:
-                cur, new = diffs["symlink_target"]
-                action |= Actions.CHANGE_SYMLINK_TARGET
-                info = self._append_msg(info, f"Symlink Target: {cur} -> {new}")
-
-            # extended_attributes
-            if not reuse_inode and "extended_attributes" in diffs:
-                cur, new = cast("tuple[list[ExtendedAttribute], list[ExtendedAttribute]]", diffs["extended_attributes"])
-                action |= Actions.CHANGE_EA
-                added, removed = self._compare_extended_attributes(cur, new)
-                if added:
-                    info = self._append_msg(info, f"Added EA: {', '.join(map(str, added))}")
-                if removed:
-                    info = self._append_msg(info, f"Removed EA: {', '.join(map(str, removed))}")
-
-            # names
-            if (
-                not reuse_inode
-                and "names" in diffs
-                and working_entry.link_count == transaction_entry.link_count
-                and working_entry.names != transaction_entry.names
-            ):
-                action |= Actions.MOVE
-                info = self._append_msg(info, f"Filenames: {working_entry.names} -> {transaction_entry.names}")
+            info, action = self._apply_crtime_change(
+                diffs,
+                working_entry,
+                transaction_entry,
+                info,
+                action,
+                reuse_inode=reuse_inode,
+                commit_ts=commit_ts,
+            )
+            info, action = self._apply_mac_changes(
+                diffs,
+                working_entry,
+                info,
+                action,
+                reuse_inode=reuse_inode,
+                commit_ts=commit_ts,
+            )
+            info, action = self._apply_non_timestamp_changes(
+                transaction,
+                inode_num,
+                diffs,
+                working_entry,
+                transaction_entry,
+                info,
+                action,
+                reuse_inode=reuse_inode,
+            )
 
         # delete hard link
         if not reuse_inode and working_entry.link_count > transaction_entry.link_count:
@@ -680,6 +901,173 @@ class JournalParserCommon[T: JournalTransaction, U: EntryInfo]:
         self._update_working_entry_fields(working_entry, transaction_entry, diffs)
         return timeline_event
 
-    def timeline(self) -> None:
-        msg = "Subclasses must implement timeline."
+    def _apply_initial_create_and_link(
+        self,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+    ) -> tuple[str, Actions]:
+        if transaction_entry.crtime != 0 and self._detect_create(transaction_entry):
+            action |= Actions.CREATE_INODE
+            info = self._append_msg(
+                info,
+                self.format_timestamp(
+                    transaction_entry.crtime,
+                    transaction_entry.crtime_nanoseconds,
+                    label="Crtime",
+                    follow=False,
+                ),
+            )
+
+        if action & Actions.CREATE_INODE:
+            action |= Actions.CREATE_HARDLINK
+            if transaction_entry.link_count > 0:
+                info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
+
+        return info, action
+
+    def _apply_initial_mac_timestomp(
+        self,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+        *,
+        commit_ts: tuple[int, int] | None,
+    ) -> tuple[str, Actions]:
+        crtime_ts = (transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
+        for mac_type, mac_ts, mac_action, label in (
+            ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
+            ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
+            ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
+        ):
+            if self._timestomp(crtime_ts, mac_ts):
+                action |= mac_action | Actions.TIMESTOMP
+                msg = self.format_timestamp(
+                    mac_ts[0],
+                    mac_ts[1],
+                    label=label,
+                    follow=False,
+                )
+                msg += f" (Timestomp: {mac_type} < crtime)"
+                info = self._append_msg(info, msg)
+            elif commit_ts and self._timestomp(mac_ts, commit_ts):
+                action |= mac_action | Actions.TIMESTOMP
+                msg = self.format_timestamp(
+                    mac_ts[0],
+                    mac_ts[1],
+                    label=label,
+                    follow=False,
+                )
+                msg += f" (Timestomp: commit_time < {mac_type})"
+                info = self._append_msg(info, msg)
+
+        return info, action
+
+    def _apply_initial_flag_change(
+        self,
+        transaction_entry: U,
+        info: str,
+        action: Actions,
+    ) -> tuple[str, Actions]:
+        if add_info := self._apply_flag_changes(transaction_entry.flags):
+            action |= Actions.CHANGE_FLAGS
+            info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
+            info = self._append_msg(info, add_info, " ")
+        return info, action
+
+    def _generate_initial_timeline_event_common(
+        self,
+        transaction: T,
+        inode_num: int,
+        transaction_entry: U,
+        commit_ts: tuple[int, int] | None = None,
+    ) -> TimelineEventInfo | None:
+        tid = transaction.tid
+        info = ""
+        action = Actions.UNKNOWN
+
+        atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
+        ctime_f = self._to_float_ts(transaction_entry.ctime, transaction_entry.ctime_nanoseconds)
+        mtime_f = self._to_float_ts(transaction_entry.mtime, transaction_entry.mtime_nanoseconds)
+        crtime_f = self._to_float_ts(transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
+        dtime_f = 0.0
+
+        transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
+
+        is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, reuse_inode=False)
+        if is_delete:
+            action |= Actions.DELETE_INODE
+            info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
+            dtime_f = self._to_float_ts(d_sec, d_nsec)
+            self._refresh_directory_entries(inode_num, transaction)
+
+        if not (action & Actions.DELETE_INODE):
+            info, action = self._apply_initial_create_and_link(transaction_entry, info, action)
+            info, action = self._apply_initial_mac_timestomp(
+                transaction_entry,
+                info,
+                action,
+                commit_ts=commit_ts,
+            )
+            info, action = self._apply_initial_flag_change(transaction_entry, info, action)
+
+        if action == Actions.UNKNOWN:
+            return None
+
+        return TimelineEventInfo(
+            transaction_id=tid,
+            inode=inode_num,
+            file_type=transaction_entry.file_type,
+            names=transaction_entry.names,
+            action=action,
+            mode=transaction_entry.mode,
+            uid=transaction_entry.uid,
+            gid=transaction_entry.gid,
+            size=transaction_entry.size,
+            atime=atime_f,
+            ctime=ctime_f,
+            mtime=mtime_f,
+            crtime=crtime_f,
+            dtime=dtime_f,
+            flags=transaction_entry.flags,
+            link_count=transaction_entry.link_count,
+            symlink_target=transaction_entry.symlink_target,
+            extended_attributes=transaction_entry.extended_attributes,
+            device_number=transaction_entry.device_number,
+            info=info,
+        )
+
+    def infer_timeline_events(self) -> Iterator[TimelineEventInfo]:
+        msg = "Subclasses must implement infer_timeline_events."
         raise NotImplementedError(msg)
+
+    def emit_timeline_events(self, events: Iterable[TimelineEventInfo]) -> int:
+        count = 0
+        if self.output_path is None:
+            for event in events:
+                print(json.dumps(event.to_dict()))
+                count += 1
+            return count
+
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.output_path.open("w", encoding="utf-8") as output_file:
+            for event in events:
+                print(json.dumps(event.to_dict()), file=output_file)
+                count += 1
+        return count
+
+    def timeline(self) -> None:
+        infer_start = perf_counter()
+        events = self.infer_timeline_events()
+        infer_elapsed = perf_counter() - infer_start
+
+        emit_start = perf_counter()
+        event_count = self.emit_timeline_events(events)
+        emit_elapsed = perf_counter() - emit_start
+
+        self.perf("timeline.infer", infer_elapsed, count=event_count)
+        self.perf("timeline.emit", emit_elapsed, count=event_count)
+        self.perf("timeline.total", infer_elapsed + emit_elapsed, count=event_count)
+
+        self.transactions.clear()
+        self.working_dents.clear()

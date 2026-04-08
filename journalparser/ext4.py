@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
+# Copyright 2025-2026 Minoru Kobayashi <unknownbit@gmail.com> (@unkn0wnbit)
 #
 #    This file is part of Forensic Journal Timeline Analyzer (FJTA).
 #    Usage or distribution of this code is subject to the terms of the Apache License, Version 2.0.
@@ -22,10 +22,8 @@
 # https://righteousit.com/2024/09/04/more-on-ext4-timestamps-and-timestomping/
 
 import copy
-import json
 import math
 import re
-import sys
 from argparse import Namespace
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -35,7 +33,6 @@ import pytsk3
 from construct import ConstError, Container, RangeError, StreamError
 
 from journalparser.common import (
-    Actions,
     DentInfo,
     DeviceNumber,
     EntryInfo,
@@ -48,6 +45,7 @@ from journalparser.common import (
     JournalParserCommon,
     JournalTransaction,
     TimelineEventInfo,
+    emit_warning,
 )
 from journalparser.structs import ext4_structs
 from journalparser.structs.ext4_structs import (
@@ -199,7 +197,7 @@ class JournalTransactionExt4(JournalTransaction[EntryInfoExt4]):
                 if name not in dent[inode_num]:
                     dent[inode_num].append(name)
             except UnicodeDecodeError:
-                print(f"set_dent_info UnicodeDecodeError: {dir_entry}", file=sys.stderr)
+                emit_warning(f"set_dent_info UnicodeDecodeError: {dir_entry}", "EXT4")
 
         # Set EntryInfo (file entry information)
         if dir_entry:
@@ -239,6 +237,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         super().__init__(img_info, fs_info, args)
         self.fstype = fstype
         self.dumpe2fs_path: Path | None = None
+        self.transaction_start_blocks: list[int] = []
 
     def _create_transaction(self, tid: int) -> JournalTransactionExt4:
         return JournalTransactionExt4(tid=tid)
@@ -412,7 +411,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
                 break
 
         if idx > len(data) - tag_size and not found_last_tag:
-            print("_parse_descriptor_block_tags JBD2_FLAG_LAST_TAG not found.", file=sys.stderr)
+            self.warn("_parse_descriptor_block_tags JBD2_FLAG_LAST_TAG not found.")
 
         return tags
 
@@ -551,7 +550,8 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         block_num = first_desc_block
 
         # Find all transactions in the journal and sort by h_sequence.
-        pbar = self.tqdm(total=journal_sb.s_maxlen - journal_sb.s_first, desc="Finding transactions", unit="block", leave=False)
+        pbar = self.progress("Finding transactions", total=journal_sb.s_maxlen - journal_sb.s_first, unit="block")
+        pbar.start()
         found_descriptor_block = False
         while block_num < first_desc_block + journal_sb.s_maxlen - journal_sb.s_first:
             read_blocks = 1
@@ -576,106 +576,103 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         pbar.close()
 
         sorted_journal_blocks = dict(sorted(journal_blocks.items()))
+        self.transaction_start_blocks = list(sorted_journal_blocks.values())
 
-        for block_num in self.tqdm(sorted_journal_blocks.values(), desc="Parsing transactions", unit="transaction", leave=False):
-            while True:
-                try:
-                    data = self._read_journal_block(block_num)
-                    block_header = journal_header_s.parse(data)
-                    self.dbg_print(f"Block header: {block_header}")
-                    transaction_id = block_header.h_sequence
+    def _parse_transaction(self, start_block_num: int) -> JournalTransactionExt4:
+        block_num = start_block_num
+        transaction: JournalTransactionExt4 | None = None
 
-                    match block_header.h_blocktype:
-                        case ext4_structs.JBD2_DESCRIPTOR_BLOCK:
-                            self.dbg_print("JBD2_DESCRIPTOR_BLOCK")
-                            self.add_transaction(transaction_id)
-                            self.dbg_print(f"Transaction ID: {transaction_id}")
-                            transaction = self.transactions[transaction_id]
-                            tags = self._parse_descriptor_block_tags(data)
-                            if tags:
-                                for tag in self.tqdm(tags, desc="Parsing block tags", unit="tag", leave=False):
-                                    self.dbg_print(f"Block tag: {tag}")
-                                    if self.jbd2_feature_incompat_64bit:
-                                        t_blocknr = tag.t_blocknr_high << 32 | tag.t_blocknr
-                                    else:
-                                        t_blocknr = tag.t_blocknr
-                                    block_num += 1
-                                    data_block = self._read_journal_block(block_num)
-                                    # If block_num is a part of inode table, parse it as inode list.
-                                    # If not, parse it as external extended attributes or ext4_dir_entry_2 entries.
-                                    inode_table_num, inode_table = self._check_inode_table_range(t_blocknr)
-                                    if inode_table:
-                                        for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table_num, inode_table, data_block):
-                                            self.dbg_print(f"Inode number: {inode_num}")
-                                            self.dbg_print(f"Inode: {inode}")
-                                            self.dbg_print(f"Extended attributes: {eattrs}")
-                                            self.transactions[transaction_id].set_inode_info(t_blocknr, inode_num, inode, eattrs)
-                                    else:
+        while True:
+            try:
+                data = self._read_journal_block(block_num)
+                block_header = journal_header_s.parse(data)
+                self.dbg_print(f"Block header: {block_header}")
+                transaction_id = block_header.h_sequence
+
+                match block_header.h_blocktype:
+                    case ext4_structs.JBD2_DESCRIPTOR_BLOCK:
+                        self.dbg_print("JBD2_DESCRIPTOR_BLOCK")
+                        transaction = self._create_transaction(transaction_id)
+                        self.dbg_print(f"Transaction ID: {transaction_id}")
+                        tags = self._parse_descriptor_block_tags(data)
+                        if tags:
+                            for tag in tags:
+                                self.dbg_print(f"Block tag: {tag}")
+                                if self.jbd2_feature_incompat_64bit:
+                                    t_blocknr = tag.t_blocknr_high << 32 | tag.t_blocknr
+                                else:
+                                    t_blocknr = tag.t_blocknr
+                                block_num += 1
+                                data_block = self._read_journal_block(block_num)
+                                inode_table_num, inode_table = self._check_inode_table_range(t_blocknr)
+                                if inode_table:
+                                    for inode_num, inode, eattrs in self._parse_inode_table(t_blocknr, inode_table_num, inode_table, data_block):
+                                        self.dbg_print(f"Inode number: {inode_num}")
+                                        self.dbg_print(f"Inode: {inode}")
+                                        self.dbg_print(f"Extended attributes: {eattrs}")
+                                        transaction.set_inode_info(t_blocknr, inode_num, inode, eattrs)
+                                else:
+                                    try:
+                                        symlink_target = data_block.decode("utf-8").rstrip("\x00")
+                                        self.dbg_print(f"Symlink target: {symlink_target}")
+                                        transaction.symlink_extents[t_blocknr] = symlink_target
+                                    except UnicodeDecodeError:
                                         try:
-                                            symlink_target = data_block.decode("utf-8").rstrip("\x00")
-                                            self.dbg_print(f"Symlink target: {symlink_target}")
-                                            self.transactions[transaction_id].symlink_extents[t_blocknr] = symlink_target
-                                        except UnicodeDecodeError:
-                                            # Parse as external extended attributes
+                                            _ = ext4_xattr_header.parse(data_block)
+                                            transaction.external_ea_blocks[t_blocknr] = self._parse_ea_entries(
+                                                data_block,
+                                                ext4_xattr_header.sizeof(),
+                                            )
+                                            self.dbg_print(f"External extended attributes {t_blocknr}: {transaction.external_ea_blocks[t_blocknr]}")
+                                        except ConstError:
                                             try:
-                                                _ = ext4_xattr_header.parse(data_block)
-                                                self.transactions[transaction_id].external_ea_blocks[t_blocknr] = self._parse_ea_entries(
-                                                    data_block,
-                                                    ext4_xattr_header.sizeof(),
-                                                )
-                                                self.dbg_print(
-                                                    f"External extended attributes {t_blocknr}: {self.transactions[transaction_id].external_ea_blocks[t_blocknr]}",
-                                                )
-                                            # Parse as directory entries
-                                            except ConstError:
-                                                try:
-                                                    dir_inode = 0
-                                                    parent_inode = 0
-                                                    self.dbg_print("Directory entry:")
-                                                    dir_entries = self._parse_directory_entries(data_block)
-                                                    if dir_entries:
-                                                        for dir_entry in dir_entries:
-                                                            if dir_entry:
-                                                                self.dbg_print(dir_entry)
-                                                                if dir_entry.name.decode("utf-8").rstrip("\x00") == ".":
-                                                                    dir_inode = dir_entry.inode
-                                                                    continue
-                                                                if dir_entry.name.decode("utf-8").rstrip("\x00") == "..":
-                                                                    parent_inode = dir_entry.inode
-                                                                    continue
-                                                            transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, dir_entry.inode, dir_entry)
-                                                    elif dir_entries == []:
-                                                        transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, [])
-                                                    elif dir_entries == None:  # StreamError exception happened in _parse_directory_entries()?
-                                                        transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, None)
-                                                except UnicodeDecodeError:
-                                                    pass
+                                                dir_inode = 0
+                                                parent_inode = 0
+                                                self.dbg_print("Directory entry:")
+                                                dir_entries = self._parse_directory_entries(data_block)
+                                                if dir_entries:
+                                                    for dir_entry in dir_entries:
+                                                        if dir_entry:
+                                                            self.dbg_print(dir_entry)
+                                                            if dir_entry.name.decode("utf-8").rstrip("\x00") == ".":
+                                                                dir_inode = dir_entry.inode
+                                                                continue
+                                                            if dir_entry.name.decode("utf-8").rstrip("\x00") == "..":
+                                                                parent_inode = dir_entry.inode
+                                                                continue
+                                                        transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, dir_entry.inode, dir_entry)
+                                                elif dir_entries == []:
+                                                    transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, [])
+                                                elif dir_entries is None:
+                                                    transaction.set_dent_info(t_blocknr, dir_inode, parent_inode, 0, None)
+                                            except UnicodeDecodeError:
+                                                pass
 
-                        case ext4_structs.JBD2_COMMIT_BLOCK:
-                            self.dbg_print("JBD2_COMMIT_BLOCK")
-                            commit = commit_header.parse(data)
-                            if self.transactions.get(transaction_id):
-                                self.transactions[transaction_id].set_commit_time(commit)
-                                break
+                    case ext4_structs.JBD2_COMMIT_BLOCK:
+                        self.dbg_print("JBD2_COMMIT_BLOCK")
+                        commit = commit_header.parse(data)
+                        if transaction and transaction.tid == transaction_id:
+                            transaction.set_commit_time(commit)
+                            return transaction
 
-                        case ext4_structs.JBD2_REVOKE_BLOCK:
-                            self.dbg_print("JBD2_REVOKE_BLOCK")
+                    case ext4_structs.JBD2_REVOKE_BLOCK:
+                        self.dbg_print("JBD2_REVOKE_BLOCK")
 
-                        case ext4_structs.JBD2_SUPERBLOCK_V1:
-                            self.dbg_print("JBD2_SUPERBLOCK_V1 is not supported.")
+                    case ext4_structs.JBD2_SUPERBLOCK_V1:
+                        self.dbg_print("JBD2_SUPERBLOCK_V1 is not supported.")
 
-                        case ext4_structs.JBD2_SUPERBLOCK_V2:
-                            self.dbg_print("JBD2_SUPERBLOCK_V2")
+                    case ext4_structs.JBD2_SUPERBLOCK_V2:
+                        self.dbg_print("JBD2_SUPERBLOCK_V2")
 
-                        case _:
-                            msg = f"Invalid block type: {block_header.h_blocktype}"
-                            raise TypeError(msg)
+                    case _:
+                        msg = f"Invalid block type: {block_header.h_blocktype}"
+                        raise TypeError(msg)
 
-                except ConstError:
-                    pass
+            except ConstError:
+                pass
 
-                finally:
-                    block_num += 1
+            finally:
+                block_num += 1
 
     # ext4 inode does not have a field for managing file generations like XFS's di_gen field.
     # ext4's l_i_version field is not equivalent to XFS's di_gen field.
@@ -696,7 +693,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
 
         return False
 
-    def _detect_delete(self, transaction_entry: EntryInfoExt4, reuse_inode: bool) -> tuple[bool, int, int]:
+    def _detect_delete(self, transaction_entry: EntryInfoExt4, *, reuse_inode: bool) -> tuple[bool, int, int]:
         if transaction_entry.dtime != 0:
             if transaction_entry.dtime == transaction_entry.ctime:
                 return True, transaction_entry.ctime, transaction_entry.ctime_nanoseconds
@@ -715,148 +712,73 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
         return self._generate_timeline_event_common(transaction, inode_num, working_entry, commit_ts)
 
-    def timeline(self) -> None:
+    def infer_timeline_events(self) -> Generator[TimelineEventInfo, None, None]:
         working_entries: dict[int, EntryInfoExt4] = {}
-        timeline_events: list[TimelineEventInfo] = []
-        for tid in self.tqdm(sorted(self.transactions), desc="Generating timeline", unit="transaction", leave=False):
-            transaction = self.transactions[tid]
-            commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
-            self.update_directory_entries(transaction)
+        try:
+            if self.transaction_start_blocks:
+                transactions = (self._parse_transaction(block_num) for block_num in self.transaction_start_blocks)
+                transaction_total = len(self.transaction_start_blocks)
+            else:
+                tids = sorted(self.transactions)
+                transactions = (self.transactions.pop(tid) for tid in tids)
+                transaction_total = len(tids)
 
-            for inode_num in self.tqdm(transaction.entries, desc=f"Inffering file activity (Transaction {tid})", unit="entry", leave=False):
-                # Skip special inodes except the root inode
-                # The root inode number is 2 and it is hanled as a normal inode here.
-                if not self.special_inodes and inode_num <= 11 and inode_num != 2:
-                    continue
-                transaction_entry = transaction.entries[inode_num]
-                # Generate working_entriy and first timeline event for each inode
-                if not working_entries.get(inode_num):
-                    msg = info = ""
-                    action = Actions.UNKNOWN
-                    working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
-                    atime_f = self._to_float_ts(transaction_entry.atime, transaction_entry.atime_nanoseconds)
-                    ctime_f = self._to_float_ts(transaction_entry.ctime, transaction_entry.ctime_nanoseconds)
-                    mtime_f = self._to_float_ts(transaction_entry.mtime, transaction_entry.mtime_nanoseconds)
-                    crtime_f = self._to_float_ts(transaction_entry.crtime, transaction_entry.crtime_nanoseconds)
-                    dtime_f = self._to_float_ts(transaction_entry.dtime, transaction_entry.dtime_nanoseconds)
+            for transaction in self.progress_iter(transactions, total=transaction_total, desc="Generating timeline", unit="transaction"):
+                tid = transaction.tid
+                commit_ts = (transaction.commit_time, transaction.commit_time_nanoseconds)
+                self.update_directory_entries(transaction)
 
-                    transaction_entry.names = self.retrieve_names_by_inodenum(inode_num)
-
-                    is_delete, d_sec, d_nsec = self._detect_delete(transaction_entry, False)
-                    if is_delete:
-                        action |= Actions.DELETE_INODE
-                        info = self._append_msg(info, self.format_timestamp(d_sec, d_nsec, label="Dtime", follow=False))
-                        dtime_f = self._to_float_ts(d_sec, d_nsec)
-                        self._refresh_directory_entries(inode_num, transaction)
-
-                    if not (action & Actions.DELETE_INODE):
-                        # Create inode
-                        if transaction_entry.crtime != 0 and self._detect_create(transaction_entry):
-                            action |= Actions.CREATE_INODE
-                            msg = self.format_timestamp(
-                                transaction_entry.crtime,
-                                transaction_entry.crtime_nanoseconds,
-                                label="Crtime",
-                                follow=False,
-                            )
-                            info = self._append_msg(info, msg)
-
-                        # Create hard link
-                        if action & Actions.CREATE_INODE:
-                            action |= Actions.CREATE_HARDLINK
-                            if transaction_entry.link_count > 0:
-                                info = self._append_msg(info, f"Link Count: {transaction_entry.link_count}")
-
-                        for mac_type, mac_ts, act, label in (
-                            ("atime", (transaction_entry.atime, transaction_entry.atime_nanoseconds), Actions.ACCESS, "Atime"),
-                            ("ctime", (transaction_entry.ctime, transaction_entry.ctime_nanoseconds), Actions.CHANGE, "Ctime"),
-                            ("mtime", (transaction_entry.mtime, transaction_entry.mtime_nanoseconds), Actions.MODIFY, "Mtime"),
+                for inode_num in self.progress_iter(
+                    transaction.entries,
+                    desc=f"Inferring file activity (Transaction {tid})",
+                    unit="entry",
+                ):
+                    # Skip special inodes except the root inode
+                    # The root inode number is 2 and it is hanled as a normal inode here.
+                    if not self.special_inodes and inode_num <= 11 and inode_num != 2:
+                        continue
+                    transaction_entry = transaction.entries[inode_num]
+                    # Generate working_entriy and first timeline event for each inode
+                    if not working_entries.get(inode_num):
+                        working_entries[inode_num] = copy.deepcopy(transaction.entries[inode_num])
+                        if timeline_event := self._generate_initial_timeline_event_common(
+                            transaction,
+                            inode_num,
+                            transaction_entry,
+                            commit_ts=commit_ts,
                         ):
-                            if self._timestomp((transaction_entry.crtime, transaction_entry.crtime_nanoseconds), mac_ts):
-                                action |= act | Actions.TIMESTOMP
-                                msg = self.format_timestamp(
-                                    mac_ts[0],
-                                    mac_ts[1],
-                                    label=label,
-                                    follow=False,
-                                )
-                                msg += f" (Timestomp: {mac_type} < crtime)"
-                                info = self._append_msg(info, msg)
-                            elif self._timestomp(mac_ts, commit_ts):
-                                action |= act | Actions.TIMESTOMP
-                                msg = self.format_timestamp(
-                                    mac_ts[0],
-                                    mac_ts[1],
-                                    label=label,
-                                    follow=False,
-                                )
-                                msg += f" (Timestomp: commit_time < {mac_type})"
-                                info = self._append_msg(info, msg)
+                            yield timeline_event
 
-                        # Set flags
-                        if transaction_entry.flags & (ext4_structs.EXT4_IMMUTABLE_FL | ext4_structs.EXT4_NOATIME_FL):
-                            action |= Actions.CHANGE_FLAGS
-                            info = self._append_msg(info, f"Flags: 0x{transaction_entry.flags:x}")
-                            if add_info := self._apply_flag_changes(transaction_entry.flags):
-                                info = self._append_msg(info, add_info, " ")
+                        # Copy symlink target to working entry
+                        if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
+                            working_entries[inode_num].symlink_target = symlink_target
+                        if symlink_target := transaction.symlink_extents.get(transaction_entry.symlink_block_num):
+                            transaction_entry.symlink_target = symlink_target
 
-                    # Copy symlink target to working entry
+                        # Update working_entry with transaction_entry
+                        working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
+
+                    # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
+                    # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
+                    if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
+                        tmp_entryinfo_source = copy.deepcopy(transaction.entries[inode_num].entryinfo_source)
+                        transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
+                        transaction.entries[inode_num].entryinfo_source = tmp_entryinfo_source | EntryInfoSource.WORKING_ENTRY
+
+                    # Copy symlink target to current entry
                     if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
-                        working_entries[inode_num].symlink_target = symlink_target
-                    if symlink_target := transaction.symlink_extents.get(transaction_entry.symlink_block_num):
-                        transaction_entry.symlink_target = symlink_target
+                        if not transaction.entries.get(inode_num):
+                            transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
+                        transaction.entries[inode_num].symlink_target = symlink_target
 
-                    # Update working_entry with transaction_entry
-                    working_entries[inode_num].names = copy.deepcopy(transaction_entry.names)
+                    # Copy external extended attributes to current entry
+                    if eattrs := transaction.external_ea_blocks.get(working_entries[inode_num].external_ea_block_num):
+                        if not transaction.entries.get(inode_num):
+                            transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
+                        transaction.entries[inode_num].extended_attributes.extend(eattrs)
 
-                    if action != Actions.UNKNOWN:
-                        timeline_events.append(
-                            TimelineEventInfo(
-                                transaction_id=tid,
-                                inode=inode_num,
-                                file_type=transaction_entry.file_type,
-                                names=transaction_entry.names,
-                                action=action,
-                                mode=transaction_entry.mode,
-                                uid=transaction_entry.uid,
-                                gid=transaction_entry.gid,
-                                size=transaction_entry.size,
-                                atime=atime_f,
-                                ctime=ctime_f,
-                                mtime=mtime_f,
-                                crtime=crtime_f,
-                                dtime=dtime_f,
-                                flags=transaction_entry.flags,
-                                link_count=transaction_entry.link_count,
-                                symlink_target=transaction_entry.symlink_target,
-                                extended_attributes=transaction_entry.extended_attributes,
-                                device_number=transaction_entry.device_number,
-                                info=info,
-                            ),
-                        )
-
-                # Sometimes transaction.entries[inode_num] has information only from only directory entries and does not have information from an inode.
-                # In such cases, transaction.entries[inode_num] is updated with working_entries[inode_num] excepted name field.
-                if transaction.entries[inode_num].entryinfo_source == EntryInfoSource.DIR_ENTRY:
-                    tmp_entryinfo_source = copy.deepcopy(transaction.entries[inode_num].entryinfo_source)
-                    transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
-                    transaction.entries[inode_num].entryinfo_source = tmp_entryinfo_source | EntryInfoSource.WORKING_ENTRY
-
-                # Copy symlink target to current entry
-                if symlink_target := transaction.symlink_extents.get(working_entries[inode_num].symlink_block_num):
-                    if not transaction.entries.get(inode_num):
-                        transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
-                    transaction.entries[inode_num].symlink_target = symlink_target
-
-                # Copy external extended attributes to current entry
-                if eattrs := transaction.external_ea_blocks.get(working_entries[inode_num].external_ea_block_num):
-                    if not transaction.entries.get(inode_num):
-                        transaction.entries[inode_num] = copy.deepcopy(working_entries[inode_num])
-                    transaction.entries[inode_num].extended_attributes.extend(eattrs)
-
-                # Generate timeline event for each inode
-                if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
-                    timeline_events.append(timeline_event)
-
-        for event in timeline_events:
-            print(json.dumps(event.to_dict()))
+                    # Generate timeline event for each inode
+                    if timeline_event := self._generate_timeline_event(transaction, inode_num, working_entries[inode_num]):
+                        yield timeline_event
+        finally:
+            self.transaction_start_blocks.clear()

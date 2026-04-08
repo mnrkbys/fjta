@@ -90,7 +90,8 @@ def test_progress_uses_yaspin_with_stderr_stream(monkeypatch: pytest.MonkeyPatch
     progress.succeed("Generated timeline (1 transactions)")
 
     assert created["text"] == "Generating timeline (0 item)"
-    assert created["spinner"] is common_module.Spinners.dots
+    assert created["spinner"].frames == common_module.Spinners.dots.frames
+    assert created["spinner"].interval == 200
     assert created["stream"] is sys.stderr
     assert created["success_text"] == "Generated timeline (1 transactions)"
 

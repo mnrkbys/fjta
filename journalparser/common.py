@@ -22,7 +22,8 @@ import pytsk3
 import pyvhdi
 import pyvmdk
 from construct import Container, StreamError
-from yaspin import yaspin
+from yaspin import Spinner, yaspin
+from yaspin.core import Yaspin
 from yaspin.spinners import Spinners
 
 
@@ -86,9 +87,18 @@ class YaspinSpinner:
         self.count = 0
         self._started = False
         self._visible = enabled and parser.output_path is not None and not parser.no_progress and not parser.has_active_progress()
-        self._spinner = yaspin(Spinners.dots, text=self._render_text(), stream=sys.stderr) if self._visible else NoOpSpinner(text)
-        if self._visible:
-            self._spinner.color = "green"
+        self._spinner = self._build_backend(text)
+
+    def _build_backend(self, fallback_text: str) -> Yaspin | NoOpSpinner:
+        if not self._visible:
+            return NoOpSpinner(fallback_text)
+        spinner = yaspin(
+            Spinner(frames=Spinners.dots.frames, interval=200),
+            text=self._render_status_text(done=False),
+            stream=sys.stderr,
+        )
+        spinner.color = "green"
+        return spinner
 
     @property
     def backend(self) -> object:
@@ -106,20 +116,13 @@ class YaspinSpinner:
         suffix = f" {self._UNITS[unit_idx]}{self.unit}".rstrip()
         return f"{scaled:.1f}{suffix}"
 
-    def _render_text(self) -> str:
+    def _render_status_text(self, *, done: bool) -> str:
+        title = f"{self.base_text} done" if done else self.base_text
         if self.total is None:
-            return f"{self.base_text} ({self._format_count(self.count)} {self.unit})"
+            return f"{title} ({self._format_count(self.count)} {self.unit})"
         if self.unit_scale:
-            return f"{self.base_text} ({self._format_count(self.count)}/{self._format_count(self.total)})"
-        return f"{self.base_text} ({self._format_count(self.count)}/{self._format_count(self.total)} {self.unit})"
-
-    def _render_done_text(self) -> str:
-        done_text = f"{self.base_text} done"
-        if self.total is None:
-            return f"{done_text} ({self._format_count(self.count)} {self.unit})"
-        if self.unit_scale:
-            return f"{done_text} ({self._format_count(self.count)}/{self._format_count(self.total)})"
-        return f"{done_text} ({self._format_count(self.count)}/{self._format_count(self.total)} {self.unit})"
+            return f"{title} ({self._format_count(self.count)}/{self._format_count(self.total)})"
+        return f"{title} ({self._format_count(self.count)}/{self._format_count(self.total)} {self.unit})"
 
     @property
     def text(self) -> str:
@@ -140,21 +143,20 @@ class YaspinSpinner:
     def update(self, step: int = 1) -> None:
         self.count += step
         if self._visible:
-            self._spinner.text = self._render_text()
+            self._spinner.text = self._render_status_text(done=False)
 
     def succeed(self, text: str | None = None) -> None:
         if not self._started:
             self.start()
         if text is None:
-            text = self._render_done_text()
+            text = self._render_status_text(done=True)
         if text is not None:
             self._spinner.text = text
-            if self._visible:
-                self._spinner.color = "green"
         if self._visible:
+            self._spinner.color = "green"
             self._spinner.ok("✔")
-        else:
-            cast("NoOpSpinner", self._spinner).succeed(text)
+        elif isinstance(self._spinner, NoOpSpinner):
+            self._spinner.succeed(text)
         if self._visible:
             self.parser.end_progress()
         self._started = False

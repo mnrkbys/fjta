@@ -643,8 +643,9 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
             dir2_data_entry = xfs_dir2_data_entry.parse(tmp_data)
             self.dbg_print(f"_brute_force_xfs_dir2_data_entry dir2_data_entry: {dir2_data_entry}")
             if (
-                xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT and dir2_data_entry.tag >= 64
-                # and not self._contains_control_chars_bytes(dir2_data_entry.name)
+                xfs_structs.XFS_DIR3_FT_UNKNOWN <= dir2_data_entry.ftype <= xfs_structs.XFS_DIR3_FT_WHT
+                and dir2_data_entry.tag >= 64
+                and not self._contains_control_chars_bytes(dir2_data_entry.name)
             ):
                 return dir2_data_entry
             namelen += 1
@@ -666,7 +667,7 @@ class JournalParserXfs(JournalParserCommon[JournalTransactionXfs, EntryInfoXfs])
                     dir2_data_entry.ftype < xfs_structs.XFS_DIR3_FT_UNKNOWN
                     or dir2_data_entry.ftype > xfs_structs.XFS_DIR3_FT_WHT
                     or dir2_data_entry.tag < 64
-                    # or self._contains_control_chars_bytes(dir2_data_entry.name)
+                    or self._contains_control_chars_bytes(dir2_data_entry.name)
                 ):
                     dir2_data_entry = self._brute_force_xfs_dir2_data_entry(data[idx:])
                     if dir2_data_entry is None:

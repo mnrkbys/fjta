@@ -464,7 +464,7 @@ class JournalParserExt4(JournalParserCommon[JournalTransactionExt4, EntryInfoExt
         data: bytes,
     ) -> Generator[tuple[int, Container, list[ExtendedAttribute]], None, None]:
         eattrs = []
-        if inode_table.head <= t_blocknr < inode_table.head + inode_table.len:
+        if inode_table.head != 0 and inode_table.head <= t_blocknr < inode_table.head + inode_table.len:
             idx = 0
             first_inode_num_in_table_block = (
                 (inode_table_num * self.s_inodes_per_group) + ((t_blocknr % inode_table.head) * (len(data) // self.s_inode_size)) + 1
